@@ -117,5 +117,5 @@ GTAGS
 # GSD planning (local only)
 .planning/
 
-#Claude Worktrees
-.claude/worktrees/
+# Claude Code (worktrees and other Claude working files)
+.claude/
