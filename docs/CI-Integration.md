@@ -136,6 +136,36 @@ When `--ci` is given and the config file exists, `GenerateFromConfig` is called
 instead of `Generate`, so command-line format/output flags are ignored in favour
 of the file contents.
 
+### Multi-platform builds
+
+When the same project is built for several targets in one pipeline (e.g. Win32
+and Win64), each invocation of `dxcomply` will by default write to the same
+`bom.json` and overwrite the previous run. Use `--include-platform-in-output`
+to append `<Platform>.<Config>` to the default base filename — explicit
+`--output` paths are never decorated:
+
+```yaml
+- name: Generate SBOM (Win32)
+  run: >
+    dxcomply
+    --project=src/MyApp.dproj
+    --platform=Win32 --config-name=Release
+    --include-platform-in-output
+    --report=html
+    --no-pause
+  # -> bom.Win32.Release.json + bom.Win32.Release.report.html
+
+- name: Generate SBOM (Win64)
+  run: >
+    dxcomply
+    --project=src/MyApp.dproj
+    --platform=Win64 --config-name=Release
+    --include-platform-in-output
+    --report=html
+    --no-pause
+  # -> bom.Win64.Release.json + bom.Win64.Release.report.html
+```
+
 ### Deep Evidence in CI
 
 The CLI tool does not compile your project — it relies on the MAP file that your

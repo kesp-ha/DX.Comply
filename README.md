@@ -115,7 +115,23 @@ If the MAP file is in a non-standard directory, use `--map-dir`:
 dxcomply --project=MyApp.dproj --map-dir=build/Win32/Release --output=bom.json --no-pause
 ```
 
-See [docs/CI-Integration.md](docs/CI-Integration.md) for GitHub Actions examples and CI configuration.
+To also generate the HTML/Markdown companion report from the CLI (the report ships disabled by default), pass `--report`:
+
+```bash
+dxcomply --project=MyApp.dproj --report=html --no-pause          # HTML only
+dxcomply --project=MyApp.dproj --report=both --no-pause          # HTML + Markdown
+dxcomply --project=MyApp.dproj --report --no-pause               # same as --report=both
+```
+
+When building the same project for several targets, append the platform/configuration to the default filename so subsequent runs don't overwrite each other:
+
+```bash
+dxcomply --project=MyApp.dproj --platform=Win64 --config-name=Release \
+         --include-platform-in-output --no-pause
+# -> bom.Win64.Release.json (+ bom.Win64.Release.report.html if --report is set)
+```
+
+Run `dxcomply --help` for the full list of switches. See [docs/CI-Integration.md](docs/CI-Integration.md) for GitHub Actions / GitLab CI examples.
 
 ### Option C — Legacy Delphi (Delphi 7 and older)
 
@@ -153,13 +169,24 @@ DX.Comply always performs a **Deep-Evidence analysis** based on the compiler-gen
 
 ## Output formats
 
+DX.Comply produces **one machine-readable SBOM** plus, optionally, one or two **human-readable companion reports** alongside it. The SBOM and the reports are distinct outputs — the SBOM is what auditors and compliance toolchains consume; the reports are for humans.
+
+### SBOM formats (machine-readable, pick one via `--format`)
+
 | Format | Version | Description |
 |---|---|---|
 | **CycloneDX JSON** | 1.5 | Default — standard SBOM format for audits and tooling |
 | **CycloneDX XML** | 1.5 | XML variant for XML-based toolchains |
 | **SPDX JSON** | 2.3 | Linux Foundation ecosystem |
-| **HTML Report** | — | Human-readable compliance report with unit evidence, artefacts, validation |
-| **Markdown Report** | — | Lightweight companion for code review and archival |
+
+### Human-readable companion reports (optional, opt-in via `--report=<format>`)
+
+| Report | Description |
+|---|---|
+| **HTML** | Compliance report with unit evidence, artefacts, and schema-validation status — pass `--report=html` |
+| **Markdown** | Lightweight companion suitable for code review and archival — pass `--report=markdown` |
+
+`--report=both` (or bare `--report`) emits both. `--report=none` keeps companion reports off (the default).
 
 All generated SBOMs are validated against the official schema before being written to disk. CycloneDX JSON output passes [`check-jsonschema`](https://github.com/python-jsonschema/check-jsonschema) validation against the [official CycloneDX 1.5 JSON schema](http://cyclonedx.org/schema/bom-1.5.schema.json).
 
