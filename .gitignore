@@ -32,6 +32,12 @@
 *.groupproj.local
 *.dproj.local
 
+# Visual Studio Code Delphi test-adapter cache (SQLite, kept open while VS Code runs)
+*.vsdcache.db
+*.vsdcache.db-shm
+*.vsdcache.db-wal
+*.vsdcache.status
+
 # History and backup files
 __history/
 __recovery/
