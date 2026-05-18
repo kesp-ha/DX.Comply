@@ -50,6 +50,8 @@ type
     FNoPause: Boolean;
     FMapDir: string;
     FNoCompositionEvidence: Boolean;
+    FIncludePlatformInOutput: Boolean;
+    FOutputExplicit: Boolean;
     FParseError: string;
     /// <summary>
     /// Converts a format string token to the corresponding TSbomFormat enum
@@ -59,6 +61,12 @@ type
     /// <summary>Appends AValue to the given dynamic string array.</summary>
     procedure AppendPattern(var APatterns: TArray<string>; const AValue: string);
   public
+    /// <summary>
+    /// Strips characters that could enable path traversal or directory
+    /// injection when a value is interpolated into a filename. Keeps only
+    /// ASCII letters, digits, hyphen and underscore. Exposed for testing.
+    /// </summary>
+    class function SanitizeForFilename(const AValue: string): string; static;
     constructor Create;
     /// <summary>
     /// Parses the process ParamStr array and populates all properties.
@@ -94,6 +102,12 @@ type
     property NoPause: Boolean read FNoPause;
     property MapDir: string read FMapDir;
     property NoCompositionEvidence: Boolean read FNoCompositionEvidence;
+    /// <summary>
+    /// When True (and --output is not supplied), the default bom.json
+    /// filename is decorated with the selected platform and configuration
+    /// (e.g. bom.Win64.Release.json) — issue #25.
+    /// </summary>
+    property IncludePlatformInOutput: Boolean read FIncludePlatformInOutput;
     property ParseError: string read FParseError;
   end;
 
@@ -186,6 +200,12 @@ begin
       Continue;
     end;
 
+    if LArg = '--include-platform-in-output' then
+    begin
+      FIncludePlatformInOutput := True;
+      Continue;
+    end;
+
     if LArg.StartsWith('--') then
     begin
       // Split into key and value at the first '='
@@ -205,7 +225,10 @@ begin
       else if LKey = 'format' then
         FFormat := ParseFormat(LValue)
       else if LKey = 'output' then
-        FOutput := LValue
+      begin
+        FOutput := LValue;
+        FOutputExplicit := True;
+      end
       else if LKey = 'platform' then
         FPlatform := LValue
       else if LKey = 'config-name' then
@@ -281,6 +304,9 @@ begin
   Writeln('  --exclude=<pattern>           File exclude pattern (repeatable)');
   Writeln('  --map-dir=<path>              Directory containing the pre-built MAP file');
   Writeln('  --no-composition-evidence     Omit source/DCU units from SBOM (binary-only)');
+  Writeln('  --include-platform-in-output  Append <Platform>.<Config> to the default');
+  Writeln('                                output filename (e.g. bom.Win64.Release.json)');
+  Writeln('                                — ignored when --output is supplied');
   Writeln('  --ci                          CI mode: use .dxcomply.json config file');
   Writeln('  --config=<path>               Path to .dxcomply.json (default: .dxcomply.json)');
   Writeln('  --help, -h                    Show this help');
@@ -301,10 +327,39 @@ end;
 // ToSbomConfig
 // ---------------------------------------------------------------------------
 
+class function TCliOptions.SanitizeForFilename(const AValue: string): string;
+var
+  LChar: Char;
+begin
+  Result := '';
+  for LChar in AValue do
+    if CharInSet(LChar, ['A'..'Z', 'a'..'z', '0'..'9', '-', '_']) then
+      Result := Result + LChar;
+end;
+
 function TCliOptions.ToSbomConfig: TSbomConfig;
+var
+  LDir, LName, LExt, LSafePlatform, LSafeConfig: string;
 begin
   Result := TSbomConfig.Default;
   Result.OutputPath      := FOutput;
+
+  // When --include-platform-in-output is set and --output was not supplied,
+  // decorate the default filename with the selected platform/config so that
+  // multi-platform builds do not overwrite one another. Issue #25.
+  //
+  // FPlatform and FConfiguration are sanitized before interpolation: a
+  // user-supplied value such as "..\\..\\evil" or "Win32/etc" would otherwise
+  // escape the intended output directory or break path semantics.
+  if FIncludePlatformInOutput and not FOutputExplicit and (FOutput <> '') then
+  begin
+    LDir          := ExtractFilePath(FOutput);
+    LExt          := ExtractFileExt(FOutput);
+    LName         := ChangeFileExt(ExtractFileName(FOutput), '');
+    LSafePlatform := TCliOptions.SanitizeForFilename(FPlatform);
+    LSafeConfig   := TCliOptions.SanitizeForFilename(FConfiguration);
+    Result.OutputPath := LDir + LName + '.' + LSafePlatform + '.' + LSafeConfig + LExt;
+  end;
   Result.Format          := FFormat;
   Result.Platform        := FPlatform;
   Result.Configuration   := FConfiguration;
