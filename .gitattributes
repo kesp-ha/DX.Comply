@@ -11,6 +11,7 @@
 *.dpr text eol=crlf
 *.dpk text eol=crlf
 *.inc text eol=crlf
+*.rc text eol=crlf
 
 # Project files
 *.dproj text eol=crlf

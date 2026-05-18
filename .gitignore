@@ -42,7 +42,10 @@ __recovery/
 # =========================
 # Build output
 # =========================
-build/
+# Ignore build output but track the build script itself
+build/*
+!build/DelphiBuildDPROJ.ps1
+!build/.gitkeep
 [Bb]in/
 [Oo]bj/
 [Dd]ebug/
