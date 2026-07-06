@@ -1237,7 +1237,7 @@ begin
     try
       Result.ProjectDir := TPath.GetDirectoryName(TPath.GetFullPath(AProjectPath));
     except
-      on EInOutArgumentException do
+      on EArgumentException do //10.3. correction EInOutArgumentException do
         Result.ProjectDir := TPath.GetDirectoryName(AProjectPath);
     end;
     Result.ProjectName := TPath.GetFileNameWithoutExtension(AProjectPath);

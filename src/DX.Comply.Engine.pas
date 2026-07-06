@@ -403,7 +403,7 @@ begin
     LArtefact.Hash := LResolvedUnit.SecondaryHashSha256;
 
     if TFile.Exists(LResolvedUnit.ResolvedPath) then
-      LArtefact.FileSize := TFile.GetSize(LResolvedUnit.ResolvedPath)
+      LArtefact.FileSize := 1//10.3. correction TFile.GetSize(LResolvedUnit.ResolvedPath)
     else
       LArtefact.FileSize := -1;
 

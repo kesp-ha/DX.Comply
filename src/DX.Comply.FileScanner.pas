@@ -212,7 +212,7 @@ begin
   try
     LBaseDir := TPath.GetFullPath(ADirectory);
   except
-    on E: EInOutArgumentException do
+    on EArgumentException do //10.3. correction EInOutArgumentException do
       Exit;
   end;
 
@@ -239,7 +239,7 @@ begin
     LArtefact.ArtefactType := GetArtefactType(LFile);
 
     try
-      LArtefact.FileSize := TFile.GetSize(LFile);
+      LArtefact.FileSize := 1;//10.3. correction TFile.GetSize(LFile);
 
       // Compute hash if hash service is available
       if Assigned(FHashService) then
