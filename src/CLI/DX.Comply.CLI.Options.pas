@@ -761,7 +761,7 @@ var
     try
       Result := TPath.GetFullPath(APath);
     except
-      on EInOutArgumentException do
+      on EArgumentException do
         ;
     end;
   end;

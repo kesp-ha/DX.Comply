@@ -1,0 +1,30 @@
+﻿DX.Comply Deep-Evidence diagnostic
+Timestamp: 2026-11-13T15:04:02
+Project: src/CLI/dxcomply.dproj
+Expected MAP: c:\Development\git\ourplant\software\Tools\DX.Comply_Kesp_Ha\build\Win32\Release\dxcomply.map
+Working directory: c:\Development\git\ourplant\software\Tools\DX.Comply_Kesp_Ha\src\CLI
+Command: powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Development\git\ourplant\software\Tools\DX.Comply_Kesp_Ha\build\DelphiBuildDPROJ.ps1" -ProjectFile "src/CLI/dxcomply.dproj" -Config "Release" -Platform "Win32" -ExtraProperty "DCC_MapFile=3"
+Success: False
+Executed: True
+ExitCode: 1
+Message: Deep-Evidence build failed with exit code 1. Build script: C:\Development\git\ourplant\software\Tools\DX.Comply_Kesp_Ha\build\DelphiBuildDPROJ.ps1 (found by searching parent directories of the DX.Comply module) Project: src/CLI/dxcomply.dproj. Expected MAP: c:\Development\git\ourplant\software\Tools\DX.Comply_Kesp_Ha\build\Win32\Release\dxcomply.map. Working directory: c:\Development\git\ourplant\software\Tools\DX.Comply_Kesp_Ha\src\CLI. Command: powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Development\git\ourplant\software\Tools\DX.Comply_Kesp_Ha\build\DelphiBuildDPROJ.ps1" -ProjectFile "src/CLI/dxcomply.dproj" -Config "Release" -Platform "Win32" -ExtraProperty "DCC_MapFile=3".
+Build output (truncated, MAP contents never included):
+=============================================
+| Universal Delphi Project Builder  -  v1.1 |
+=============================================
+DelphiBuildDPROJ - Universal Delphi Project Builder
+
+Initializing Delphi environment...
+No Delphi version specified, auto-detecting...
+  Scanning registry: HKLM:\SOFTWARE\Embarcadero\BDS
+  Found Delphi 20.0 at: C:\Program Files (x86)\Embarcadero\Studio\20.0\
+  Scanning registry: HKLM:\SOFTWARE\WOW6432Node\Embarcadero\BDS
+  Found Delphi 20.0 at: C:\Program Files (x86)\Embarcadero\Studio\20.0\
+  Available versions: 20.0, 20.0
+  Using latest: 20.0
+Using Delphi 20.0
+Loading Delphi environment...
+Delphi environment initialized
+MSBuild: C:\Windows\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe
+
+Project file not found: src/CLI/dxcomply.dproj

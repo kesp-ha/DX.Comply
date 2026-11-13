@@ -333,7 +333,7 @@ begin
     end;
     if not TryMerge(LExisting, AHeader, LMerged, AError) then
       Exit(False);
-    TFile.WriteAllText(AConfigPath, LMerged + sLineBreak, TUTF8Encoding.Create(False));
+    TFile.WriteAllBytes(AConfigPath, TEncoding.UTF8.GetBytes(LMerged + sLineBreak)); // no BOM
     Result := True;
   except
     on E: Exception do

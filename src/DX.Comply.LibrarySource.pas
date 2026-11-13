@@ -474,7 +474,7 @@ begin
   try
     Result := TPath.GetFullPath(Result);
   except
-    on EInOutArgumentException do
+    on EArgumentException do
       ;
   end;
   Result := StripTrailingSeparator(Result);
@@ -568,7 +568,7 @@ begin
   try
     Result := TPath.GetFullPath(LPath);
   except
-    on EInOutArgumentException do
+    on EArgumentException do
       Result := LPath;
   end;
 end;

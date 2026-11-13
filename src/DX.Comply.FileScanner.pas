@@ -111,6 +111,19 @@ type
 
 implementation
 
+// TFile.GetSize is not available before Delphi 11
+function GetFileSizeCompat(const AFilePath: string): Int64;
+var
+  LStream: TFileStream;
+begin
+  LStream := TFileStream.Create(AFilePath, fmOpenRead or fmShareDenyNone);
+  try
+    Result := LStream.Size;
+  finally
+    LStream.Free;
+  end;
+end;
+
 { TFileScanner }
 
 constructor TFileScanner.Create(const AHashService: IHashService);
@@ -474,7 +487,7 @@ begin
     LArtefact.ArtefactType := GetArtefactType(LFile);
 
     try
-      LArtefact.FileSize := 1;//10.3. correction TFile.GetSize(LFile);
+      LArtefact.FileSize := GetFileSizeCompat(LFile);
 
       if Assigned(FHashService) then
       begin
@@ -559,7 +572,7 @@ begin
   if TFile.Exists(AFilePath) then
   begin
     try
-      AArtefact.FileSize := TFile.GetSize(AFilePath);
+      AArtefact.FileSize := GetFileSizeCompat(AFilePath);
       if Assigned(FHashService) then
       begin
         AArtefact.Hash := FHashService.ComputeSha256(AFilePath);

@@ -589,6 +589,20 @@ uses
   DX.Comply.Report.Support,
   DX.Comply.VersionInfo;
 
+// TFile.GetSize is not available before Delphi 11
+function GetFileSizeCompat(const AFilePath: string): Int64;
+var
+  LStream: TFileStream;
+begin
+  LStream := TFileStream.Create(AFilePath, fmOpenRead or fmShareDenyNone);
+  try
+    Result := LStream.Size;
+  finally
+    LStream.Free;
+  end;
+end;
+
+
 { TSbomConfig }
 
 class function TSbomConfig.Default: TSbomConfig;
@@ -1001,7 +1015,7 @@ begin
     LArtefact.HashSha512 := LResolvedUnit.PrimaryHashSha512;
 
     if TFile.Exists(LResolvedUnit.ResolvedPath) then
-      LArtefact.FileSize := 1//10.3. correction TFile.GetSize(LResolvedUnit.ResolvedPath)
+      LArtefact.FileSize := GetFileSizeCompat(LResolvedUnit.ResolvedPath)
     else
       LArtefact.FileSize := -1;
 
@@ -1419,7 +1433,7 @@ begin
   try
     LFull := ExcludeTrailingPathDelimiter(TPath.GetFullPath(APath));
   except
-    on E: EInOutArgumentException do
+    on E: EArgumentException do
       Exit;
   end;
   Result := MatchesSystemDir(LFull, LWindows, 'System32') or
@@ -1522,7 +1536,7 @@ var
         try
           LFull := TPath.GetFullPath(LFile);
         except
-          on E: EInOutArgumentException do
+          on E: EArgumentException do
             Continue;
         end;
         if IsWindowsSystemPath(LFull) then
@@ -1596,7 +1610,7 @@ begin
   try
     LRoot := ExcludeTrailingPathDelimiter(TPath.GetFullPath(AProjectDir));
   except
-    on E: EInOutArgumentException do
+    on E: EArgumentException do
       Exit;
   end;
   if IsWindowsSystemPath(LRoot) or not TDirectory.Exists(LRoot) then
@@ -1612,7 +1626,7 @@ begin
       if SameDir(LSkipOutput, LRoot) then
         LSkipOutput := '';
     except
-      on E: EInOutArgumentException do
+      on E: EArgumentException do
         LSkipOutput := '';
     end;
 
@@ -1797,7 +1811,7 @@ begin
         Exit;
       end;
   try
-    AArtefact.FileSize := TFile.GetSize(APath);
+    AArtefact.FileSize := GetFileSizeCompat(APath);
     if Assigned(FHashService) then
     begin
       AArtefact.Hash := FHashService.ComputeSha256(APath);
@@ -2788,7 +2802,7 @@ begin
         try
           LOutputFile := TPath.GetFullPath(LOutputFile);
         except
-          on E: EInOutArgumentException do
+          on E: EArgumentException do
             LOutputFile := AProjectInfo.OutputFilePath;
         end;
         if FFileScanner.CollectFile(LOutputFile,
@@ -2903,7 +2917,7 @@ begin
     try
       LProjectPath := TPath.GetFullPath(LProjectPath);
     except
-      on EInOutArgumentException do
+      on EArgumentException do
         LProjectPath := TPath.Combine(GetCurrentDir, LProjectPath);
     end;
   end;
@@ -2987,7 +3001,7 @@ begin
       try
         LDir := TPath.GetFullPath(LDir);
       except
-        on EInOutArgumentException do
+        on EArgumentException do
           ;
       end;
       SetLength(LSourceDirs, Length(LSourceDirs) + 1);
@@ -3045,7 +3059,7 @@ begin
       if TFile.Exists(LFile.FullPath) then
       begin
         try
-          LArtefact.FileSize := TFile.GetSize(LFile.FullPath);
+          LArtefact.FileSize := GetFileSizeCompat(LFile.FullPath);
           LArtefact.Hash := FHashService.ComputeSha256(LFile.FullPath);
           LArtefact.HashSha512 := FHashService.ComputeSha512(LFile.FullPath);
         except

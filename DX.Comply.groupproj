@@ -50,23 +50,23 @@
     <Target Name="DX_Comply_Tests:Make">
         <MSBuild Projects="tests\DX.Comply.Tests.dproj" Targets="Make"/>
     </Target>
-    <Target Name="DX_Comply_CLI">
+    <Target Name="dxcomply">
         <MSBuild Projects="src\CLI\dxcomply.dproj"/>
     </Target>
-    <Target Name="DX_Comply_CLI:Clean">
+    <Target Name="dxcomply:Clean">
         <MSBuild Projects="src\CLI\dxcomply.dproj" Targets="Clean"/>
     </Target>
-    <Target Name="DX_Comply_CLI:Make">
+    <Target Name="dxcomply:Make">
         <MSBuild Projects="src\CLI\dxcomply.dproj" Targets="Make"/>
     </Target>
     <Target Name="Build">
-        <CallTarget Targets="DX_Comply_Engine;DX_Comply_IDE;DX_Comply_Tests;DX_Comply_CLI"/>
+        <CallTarget Targets="DX_Comply_Engine;DX_Comply_IDE;DX_Comply_Tests;dxcomply"/>
     </Target>
     <Target Name="Clean">
-        <CallTarget Targets="DX_Comply_Engine:Clean;DX_Comply_IDE:Clean;DX_Comply_Tests:Clean;DX_Comply_CLI:Clean"/>
+        <CallTarget Targets="DX_Comply_Engine:Clean;DX_Comply_IDE:Clean;DX_Comply_Tests:Clean;dxcomply:Clean"/>
     </Target>
     <Target Name="Make">
-        <CallTarget Targets="DX_Comply_Engine:Make;DX_Comply_IDE:Make;DX_Comply_Tests:Make;DX_Comply_CLI:Make"/>
+        <CallTarget Targets="DX_Comply_Engine:Make;DX_Comply_IDE:Make;DX_Comply_Tests:Make;dxcomply:Make"/>
     </Target>
     <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
 </Project>
