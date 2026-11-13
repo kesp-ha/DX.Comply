@@ -4,7 +4,7 @@
 /// </summary>
 ///
 /// <remarks>
-/// Verifies CycloneDX 1.5 XML output: namespace, required elements,
+/// Verifies CycloneDX 1.6 XML output: namespace, required elements,
 /// component entries, hash embedding, metadata, dependency section,
 /// serial-number uniqueness, validation logic, and XML escaping.
 /// </remarks>
@@ -20,12 +20,15 @@ interface
 
 uses
   System.SysUtils,
+  System.StrUtils,
   System.IOUtils,
   System.Classes,
   System.Generics.Collections,
   DUnitX.TestFramework,
   DX.Comply.CycloneDx.XmlWriter,
-  DX.Comply.Engine.Intf;
+  DX.Comply.Engine.Intf,
+  DX.Comply.Schema.Validator,
+  DX.Comply.VersionInfo;
 
 type
   [TestFixture]
@@ -82,6 +85,16 @@ type
     procedure Write_ContainsDependencies;
 
     [Test]
+    procedure Write_Dependencies_GroupedUnderDeliverable;
+
+    /// <summary>
+    /// A source-scanned DLL has no file on disk. Evidence, confidence and
+    /// the conditional flag must still be written. Issue #45.
+    /// </summary>
+    [Test]
+    procedure Write_ExternalDll_MissingFile_KeepsEvidence;
+
+    [Test]
     procedure Validate_ValidXml_ReturnsTrue;
 
     [Test]
@@ -92,6 +105,50 @@ type
 
     [Test]
     procedure Write_SpecialChars_AreEscaped;
+
+    /// <summary>
+    /// Metadata children must follow the CycloneDX 1.6 sequence.
+    /// The metadata component may contain its own properties element, so the
+    /// check uses the properties element that is a direct child of metadata.
+    /// </summary>
+    [Test]
+    procedure Write_MetadataElementOrder_MatchesSchema;
+
+    /// <summary>
+    /// The product licence sits between version and properties on the
+    /// metadata component. An empty licence writes no licenses element.
+    /// </summary>
+    [Test]
+    procedure Write_RootLicence_BetweenVersionAndProperties;
+    [Test]
+    procedure Write_ProductLicence_OnBuiltProgramOnly;
+    /// <summary>
+    /// The project output file keeps the product licence when its type is
+    /// not application, library, or package. A second copy of that file
+    /// does too. A neighboring application does not (issue #155).
+    /// </summary>
+    [Test]
+    procedure Write_ProductLicence_OnUntypedProjectExe;
+    /// <summary>
+    /// Embarcadero units carry their origin label. Own-code units carry the
+    /// product licence. A third-party file does not. Issues #165 and #166.
+    /// </summary>
+    [Test]
+    procedure Write_UnitLicences_EmbarcaderoAndOwnCode;
+    /// <summary>
+    /// The built program with no version of its own uses the product version.
+    /// A third-party file does not.
+    /// </summary>
+    [Test]
+    procedure Write_DeliverableWithoutVersion_UsesProductVersion;
+
+    /// <summary>Component hashes must precede purl.</summary>
+    [Test]
+    procedure Write_ComponentElementOrder_HashesBeforePurl;
+
+    /// <summary>A document with the old element order must fail validation.</summary>
+    [Test]
+    procedure Validate_OutOfOrderElements_ReturnsFalse;
   end;
 
 implementation
@@ -109,9 +166,14 @@ begin
   FMetadata.ProductName := 'TestProduct';
   FMetadata.ProductVersion := '1.0.0';
   FMetadata.Supplier := 'Test GmbH';
+  FMetadata.SupplierUrl := '';
+  FMetadata.Licence := '';
   FMetadata.Timestamp := '2026-02-24T10:00:00+01:00';
   FMetadata.ToolName := 'DX.Comply';
-  FMetadata.ToolVersion := '1.0.0';
+  FMetadata.ToolVersion := '';
+  // DUnitX reuses one fixture instance. Drop property arrays left by an earlier test.
+  SetLength(FMetadata.Properties, 0);
+  SetLength(FMetadata.ComponentProperties, 0);
 
   FProjectInfo := TProjectInfo.Create;
   FProjectInfo.ProjectName := 'TestProject';
@@ -181,7 +243,7 @@ var
 begin
   FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
   LContent := LoadOutputContent;
-  Assert.IsTrue(Pos('http://cyclonedx.org/schema/bom/1.5', LContent) > 0);
+  Assert.IsTrue(Pos('http://cyclonedx.org/schema/bom/1.6', LContent) > 0);
 end;
 
 procedure TCycloneDxXmlWriterTests.Write_ContainsSerialNumber;
@@ -209,7 +271,8 @@ var
 begin
   FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
   LContent := LoadOutputContent;
-  Assert.IsTrue(Pos('<timestamp>2026-02-24T10:00:00+01:00</timestamp>', LContent) > 0);
+  // The +01:00 input is written as UTC with a Z suffix.
+  Assert.IsTrue(Pos('<timestamp>2026-02-24T09:00:00Z</timestamp>', LContent) > 0);
 end;
 
 procedure TCycloneDxXmlWriterTests.Write_ContainsToolInfo;
@@ -220,6 +283,296 @@ begin
   LContent := LoadOutputContent;
   Assert.IsTrue(Pos('<name>DX.Comply</name>', LContent) > 0);
   Assert.IsTrue(Pos('<vendor>Olaf Monien</vendor>', LContent) > 0);
+  Assert.IsTrue(Pos('<version>' + GetDxComplyToolVersion + '</version>', LContent) > 0,
+    'The tool version must come from the running module');
+end;
+
+function MetadataDirectChildPos(const AMetadata, AElementName: string): Integer;
+var
+  I: Integer;
+  J: Integer;
+  LDepth: Integer;
+  LName: string;
+  LQuote: Char;
+  LSelfClosing: Boolean;
+begin
+  // 1-based position of an opening tag that is a direct child of <metadata>.
+  // Nested elements, including properties inside metadata/component, are ignored.
+  Result := 0;
+  LDepth := 0;
+  I := 1;
+  while I <= Length(AMetadata) do
+  begin
+    if AMetadata[I] <> '<' then
+    begin
+      Inc(I);
+      Continue;
+    end;
+
+    if (I < Length(AMetadata)) and (AMetadata[I + 1] = '/') then
+    begin
+      if LDepth > 0 then
+        Dec(LDepth);
+      Inc(I);
+      Continue;
+    end;
+
+    if (I < Length(AMetadata)) and
+      ((AMetadata[I + 1] = '!') or (AMetadata[I + 1] = '?')) then
+    begin
+      Inc(I);
+      Continue;
+    end;
+
+    J := I + 1;
+    while (J <= Length(AMetadata)) and
+      (AMetadata[J] <> ' ') and (AMetadata[J] <> #9) and
+      (AMetadata[J] <> #10) and (AMetadata[J] <> #13) and
+      (AMetadata[J] <> '>') and (AMetadata[J] <> '/') do
+      Inc(J);
+    LName := Copy(AMetadata, I + 1, J - I - 1);
+
+    LSelfClosing := False;
+    LQuote := #0;
+    while (J <= Length(AMetadata)) and (AMetadata[J] <> '>') do
+    begin
+      if LQuote <> #0 then
+      begin
+        if AMetadata[J] = LQuote then
+          LQuote := #0;
+      end
+      else if (AMetadata[J] = '"') or (AMetadata[J] = '''') then
+        LQuote := AMetadata[J]
+      else if AMetadata[J] = '/' then
+        LSelfClosing := True;
+      Inc(J);
+    end;
+
+    if (LDepth = 1) and SameText(LName, AElementName) then
+      Exit(I);
+
+    if not LSelfClosing then
+      Inc(LDepth);
+    if J <= Length(AMetadata) then
+      I := J + 1
+    else
+      I := J;
+  end;
+end;
+
+procedure TCycloneDxXmlWriterTests.Write_MetadataElementOrder_MatchesSchema;
+var
+  LComponent, LComponentAt, LContent, LMetadata, LNameAt, LPropertiesAt, LSupplierAt, LToolsAt: string;
+  LComponentEnd, LComponentStart, LMetaEnd, LMetaStart, LPropertiesPos: Integer;
+begin
+  SetLength(FMetadata.Properties, 1);
+  FMetadata.Properties[0] := TSbomProperty.Create('dx:profile', 'cra');
+  // Component properties are nested inside metadata/component. They must not
+  // be treated as the metadata-level properties element.
+  SetLength(FMetadata.ComponentProperties, 1);
+  FMetadata.ComponentProperties[0] := TSbomProperty.Create(
+    'net.developer-experts.dx-comply:build.configuration', 'Release');
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LContent := LoadOutputContent;
+
+  LMetaStart := Pos('<metadata>', LContent);
+  LMetaEnd := Pos('</metadata>', LContent);
+  Assert.IsTrue((LMetaStart > 0) and (LMetaEnd > LMetaStart),
+    'The document must contain a metadata element');
+  LMetadata := Copy(LContent, LMetaStart, LMetaEnd - LMetaStart);
+
+  LToolsAt := IntToStr(Pos('<tools>', LMetadata));
+  LComponentAt := IntToStr(Pos('<component ', LMetadata));
+  LPropertiesPos := MetadataDirectChildPos(LMetadata, 'properties');
+  LPropertiesAt := IntToStr(LPropertiesPos);
+  Assert.IsTrue(Pos('<tools>', LMetadata) < Pos('<component ', LMetadata),
+    'metadata tools must precede metadata component. tools at ' + LToolsAt +
+    ', component at ' + LComponentAt);
+  Assert.IsTrue(LPropertiesPos > 0,
+    'metadata must contain a properties element that is a direct child. properties at ' +
+    LPropertiesAt);
+  Assert.IsTrue(Pos('</component>', LMetadata) < LPropertiesPos,
+    'metadata properties must follow the metadata component. properties at ' + LPropertiesAt);
+
+  // <tools><tool><name> sits before the metadata component, so supplier and
+  // name must be compared inside that component. CycloneDX 1.6 places
+  // supplier before name there.
+  LComponentStart := Pos('<component ', LMetadata);
+  LComponentEnd := Pos('</component>', LMetadata);
+  Assert.IsTrue((LComponentStart > 0) and (LComponentEnd > LComponentStart),
+    'metadata must contain a component element');
+  LComponent := Copy(LMetadata, LComponentStart,
+    LComponentEnd - LComponentStart + Length('</component>'));
+  LSupplierAt := IntToStr(Pos('<supplier>', LComponent));
+  LNameAt := IntToStr(Pos('<name>', LComponent));
+  Assert.IsTrue((Pos('<supplier>', LComponent) > 0) and
+    (Pos('<supplier>', LComponent) < Pos('<name>', LComponent)),
+    'component supplier must precede name. supplier at ' + LSupplierAt +
+    ', name at ' + LNameAt);
+  Assert.AreEqual(NativeInt(0), NativeInt(Length(CycloneDxXmlSequenceErrors(LContent))),
+    'The written document must satisfy the CycloneDX 1.6 element order');
+end;
+
+procedure TCycloneDxXmlWriterTests.Write_RootLicence_BetweenVersionAndProperties;
+var
+  LComponent, LContent, LMetadata: string;
+  LComponentEnd, LComponentStart, LMetaEnd, LMetaStart: Integer;
+  LLicencesAt, LPropertiesAt, LVersionAt: Integer;
+begin
+  FMetadata.Supplier := 'Test GmbH';
+  FMetadata.Licence := 'MIT';
+  SetLength(FMetadata.ComponentProperties, 1);
+  FMetadata.ComponentProperties[0] := TSbomProperty.Create(
+    'net.developer-experts.dx-comply:build.configuration', 'Release');
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LContent := LoadOutputContent;
+
+  LMetaStart := Pos('<metadata>', LContent);
+  LMetaEnd := Pos('</metadata>', LContent);
+  Assert.IsTrue((LMetaStart > 0) and (LMetaEnd > LMetaStart),
+    'The document must contain a metadata element');
+  LMetadata := Copy(LContent, LMetaStart, LMetaEnd - LMetaStart);
+  LComponentStart := Pos('<component ', LMetadata);
+  LComponentEnd := Pos('</component>', LMetadata);
+  Assert.IsTrue((LComponentStart > 0) and (LComponentEnd > LComponentStart),
+    'metadata must contain a component element');
+  LComponent := Copy(LMetadata, LComponentStart,
+    LComponentEnd - LComponentStart + Length('</component>'));
+
+  LVersionAt := Pos('<version>', LComponent);
+  LLicencesAt := Pos('<licenses>', LComponent);
+  LPropertiesAt := Pos('<properties>', LComponent);
+  Assert.IsTrue(LVersionAt > 0, 'The metadata component must have a version');
+  Assert.IsTrue(LLicencesAt > LVersionAt, 'licenses must follow version');
+  Assert.IsTrue(LPropertiesAt > LLicencesAt, 'properties must follow licenses');
+  Assert.IsTrue(Pos('<id>MIT</id>', LComponent) > LLicencesAt);
+  Assert.IsTrue(Pos('<license acknowledgement="concluded">', LComponent) <
+    Pos('<license acknowledgement="declared">', LComponent));
+  Assert.AreEqual(0, Integer(Length(CycloneDxXmlSequenceErrors(LContent))),
+    'A root licence must keep the CycloneDX 1.6 element order');
+
+  FMetadata.Licence := '';
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LContent := LoadOutputContent;
+  Assert.AreEqual(0, Pos('<licenses>', LContent),
+    'An empty licence writes no licenses element');
+end;
+
+procedure TCycloneDxXmlWriterTests.Write_ProductLicence_OnBuiltProgramOnly;
+var
+  LContent, LComponents, LFirst, LSecond: string;
+  LStart, LSplit: Integer;
+begin
+  FMetadata.Licence := 'MIT';
+  FArtefacts.Add(MakeArtefact('TestProject.exe', 'application', 'abcd1234ef', 1024));
+  FArtefacts.Add(MakeArtefact('vendor.dll', 'library', 'abcd1234ef', 1024));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LContent := LoadOutputContent;
+  LStart := Pos('<components>', LContent);
+  Assert.IsTrue(LStart > 0, 'The document must contain components');
+  LComponents := Copy(LContent, LStart, MaxInt);
+  LSplit := Pos('</component>', LComponents);
+  LFirst := Copy(LComponents, 1, LSplit);
+  LSecond := Copy(LComponents, LSplit + 1, Pos('</component>',
+    Copy(LComponents, LSplit + 1, MaxInt)));
+  Assert.IsTrue(Pos('TestProject.exe', LFirst) > 0);
+  Assert.IsTrue(Pos('<licenses>', LFirst) > Pos('<hashes>', LFirst),
+    'The built program carries the licence after its hashes');
+  Assert.IsTrue(Pos('vendor.dll', LSecond) > 0);
+  Assert.AreEqual(0, Pos('<licenses>', LSecond),
+    'Other files must not get the product licence');
+  Assert.AreEqual(0, Integer(Length(CycloneDxXmlSequenceErrors(LContent))),
+    'The component licence must keep the CycloneDX 1.6 element order');
+end;
+
+procedure TCycloneDxXmlWriterTests.Write_ProductLicence_OnUntypedProjectExe;
+var
+  LContent, LComponents, LRest, LChunk: string;
+  LStart, LAt, LLicensed: Integer;
+begin
+  FProjectInfo.ProjectName := 'OtherApp';
+  FProjectInfo.OutputFilePath := 'C:\Projects\build\XmlConvert.exe';
+  FMetadata.Licence := 'MIT';
+  FArtefacts.Add(MakeArtefact('XmlConvert.exe', 'file', 'abcd1234ef', 1024));
+  FArtefacts.Add(MakeArtefact('setup\XmlConvert.exe', 'file', 'abcd1234ef', 2048));
+  FArtefacts.Add(MakeArtefact('OtherApp.exe', 'application', 'abcd1234ef', 512));
+  FArtefacts.Add(MakeArtefact('bit.dll', 'library', 'abcd1234ef', 256));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LContent := LoadOutputContent;
+  LStart := Pos('<components>', LContent);
+  Assert.IsTrue(LStart > 0, 'The document must contain components');
+  LComponents := Copy(LContent, LStart, Pos('</components>', LContent) - LStart);
+  Assert.IsTrue(Pos('XmlConvert.exe', LComponents) > 0);
+  Assert.IsTrue(Pos('OtherApp.exe', LComponents) > 0);
+  Assert.IsTrue(Pos('bit.dll', LComponents) > 0);
+  LRest := LComponents;
+  LLicensed := 0;
+  while True do
+  begin
+    LAt := Pos('</component>', LRest);
+    if LAt = 0 then
+      Break;
+    LChunk := Copy(LRest, 1, LAt);
+    LRest := Copy(LRest, LAt + Length('</component>'), MaxInt);
+    if Pos('XmlConvert.exe', LChunk) > 0 then
+    begin
+      Assert.IsTrue(Pos('<licenses>', LChunk) > Pos('<hashes>', LChunk),
+        'The project executable carries the licence after its hashes');
+      Inc(LLicensed);
+    end;
+    if (Pos('OtherApp.exe', LChunk) > 0) or (Pos('bit.dll', LChunk) > 0) then
+      Assert.AreEqual(0, Pos('<licenses>', LChunk),
+        'A neighboring binary must not get the product licence');
+  end;
+  Assert.AreEqual(2, LLicensed, 'Both copies of the project executable are licensed');
+  Assert.AreEqual(0, Integer(Length(CycloneDxXmlSequenceErrors(LContent))),
+    'The component licence must keep the CycloneDX 1.6 element order');
+end;
+
+procedure TCycloneDxXmlWriterTests.Write_ComponentElementOrder_HashesBeforePurl;
+var
+  LComponents: string;
+  LContent: string;
+  LEnd, LStart: Integer;
+begin
+  FArtefacts.Add(MakeArtefact('MyApp.exe', 'application',
+    'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789', 102400));
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LContent := LoadOutputContent;
+  LStart := Pos('<components>', LContent);
+  LEnd := Pos('</components>', LContent);
+  LComponents := Copy(LContent, LStart, LEnd - LStart);
+  // A file component has no purl. Hashes still precede properties.
+  Assert.AreEqual(0, Pos('<purl>', LComponents), 'a file component has no purl');
+  Assert.IsTrue(Pos('<hashes>', LComponents) > 0, LComponents);
+  Assert.IsTrue(Pos('<hashes>', LComponents) < Pos('<properties>', LComponents),
+    'component hashes must precede properties');
+end;
+
+procedure TCycloneDxXmlWriterTests.Validate_OutOfOrderElements_ReturnsFalse;
+const
+  cOutOfOrder =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<bom xmlns="http://cyclonedx.org/schema/bom/1.6" version="1" ' +
+    'serialNumber="urn:uuid:12345678-1234-1234-1234-123456789012">' +
+    '<metadata>' +
+    '<timestamp>2026-02-24T10:00:00+01:00</timestamp>' +
+    '<properties><property name="dx:profile">cra</property></properties>' +
+    '<tools><tool><vendor>Olaf Monien</vendor><name>DX.Comply</name>' +
+    '<version>2.0.0.0</version></tool></tools>' +
+    '<component type="application" bom-ref="App"><name>App</name></component>' +
+    '</metadata>' +
+    '<components><component type="application" bom-ref="comp-0">' +
+    '<name>App.exe</name><purl>file:App.exe</purl>' +
+    '<hashes><hash alg="SHA-256">' +
+    'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789' +
+    '</hash></hashes></component></components>' +
+    '</bom>';
+begin
+  Assert.IsFalse(FWriter.Validate(cOutOfOrder),
+    'Validation must reject metadata properties before tools and purl before hashes');
+  Assert.IsTrue(Length(CycloneDxXmlSequenceErrors(cOutOfOrder)) > 0,
+    'The sequence check must report the old element order');
 end;
 
 procedure TCycloneDxXmlWriterTests.Write_ContainsDxComplyProperties;
@@ -228,7 +581,7 @@ var
 begin
   SetLength(FMetadata.Properties, 2);
   FMetadata.Properties[0] := TSbomProperty.Create(
-    'net.developer-experts.dx-comply:document.profile', 'cra-compliance-assessment');
+    'net.developer-experts.dx-comply:document.profile', 'build-evidence');
   FMetadata.Properties[1] := TSbomProperty.Create(
     'net.developer-experts.dx-comply:assessment.warning-count', '0');
   SetLength(FMetadata.ComponentProperties, 1);
@@ -239,7 +592,7 @@ begin
   LContent := LoadOutputContent;
 
   Assert.IsTrue(Pos('<properties>', LContent) > 0);
-  Assert.IsTrue(Pos('<property name="net.developer-experts.dx-comply:document.profile">cra-compliance-assessment</property>', LContent) > 0);
+  Assert.IsTrue(Pos('<property name="net.developer-experts.dx-comply:document.profile">build-evidence</property>', LContent) > 0);
   Assert.IsTrue(Pos('<property name="net.developer-experts.dx-comply:assessment.warning-count">0</property>', LContent) > 0);
   Assert.IsTrue(Pos('<property name="net.developer-experts.dx-comply:build.configuration">Release</property>', LContent) > 0);
 end;
@@ -279,6 +632,58 @@ begin
   Assert.IsTrue(Pos('ref="TestProject"', LContent) > 0);
 end;
 
+procedure TCycloneDxXmlWriterTests.Write_Dependencies_GroupedUnderDeliverable;
+var
+  LContent: string;
+  LTargetOpen: Integer;
+begin
+  FArtefacts.Add(MakeArtefact('TestProject.exe', 'application', '', 1024));
+  FArtefacts.Add(MakeArtefact('rtl.bpl', 'runtime-package', '', -1));
+  FArtefacts.Add(MakeArtefact('vendor.dll', 'external-reference', '', -1));
+  FArtefacts.Add(MakeArtefact('System.dcu', 'unit-evidence', '', 100));
+
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LContent := LoadOutputContent;
+
+  Assert.IsTrue(Pos('<dependency ref="comp-0"/>', LContent) > 0,
+    'the project must depend on the deliverable');
+  LTargetOpen := Pos('<dependency ref="comp-0">', LContent);
+  Assert.IsTrue(LTargetOpen > 0, 'the deliverable must have its own dependency entry');
+  Assert.IsTrue(Pos('<dependency ref="comp-1"/>', LContent) > LTargetOpen,
+    'the runtime package must be a dependency of the deliverable');
+  Assert.IsTrue(Pos('<dependency ref="comp-2"/>', LContent) > LTargetOpen,
+    'the external DLL must be a dependency of the deliverable');
+  Assert.IsTrue(Pos('<dependency ref="comp-3"/>', LContent) > LTargetOpen,
+    'the linked unit must be a dependency of the deliverable');
+end;
+
+procedure TCycloneDxXmlWriterTests.Write_ExternalDll_MissingFile_KeepsEvidence;
+var
+  LArtefact: TArtefactInfo;
+  LContent: string;
+begin
+  LArtefact := MakeArtefact('uastack_64.dll', 'external-reference', '', -1);
+  LArtefact.Origin := '';
+  LArtefact.Evidence := 'DLL';
+  LArtefact.Confidence := 'Source-scan';
+  LArtefact.Conditional := True;
+  FArtefacts.Add(LArtefact);
+
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LContent := LoadOutputContent;
+
+  Assert.IsTrue(Pos('<name>uastack_64.dll</name>', LContent) > 0,
+    'the DLL must be a component even when the file is absent');
+  Assert.IsTrue(Pos('net.developer-experts.dx-comply:evidence">DLL</property>', LContent) > 0,
+    'evidence must be written when size is unknown and origin is empty');
+  Assert.IsTrue(Pos('net.developer-experts.dx-comply:confidence">Source-scan</property>', LContent) > 0,
+    'confidence must be written when size is unknown and origin is empty');
+  Assert.IsTrue(Pos('net.developer-experts.dx-comply:conditional">true</property>', LContent) > 0,
+    'a conditional DLL name must be marked in the XML properties');
+  Assert.AreEqual(0, Pos('file:size', LContent),
+    'an absent file must not invent a size');
+end;
+
 procedure TCycloneDxXmlWriterTests.Validate_ValidXml_ReturnsTrue;
 var
   LContent: string;
@@ -313,6 +718,145 @@ begin
   LContent := LoadOutputContent;
   // The special characters should be escaped in XML
   Assert.IsTrue(Pos('Test&amp;App&lt;1&gt;', LContent) > 0);
+end;
+
+procedure TCycloneDxXmlWriterTests.Write_UnitLicences_EmbarcaderoAndOwnCode;
+var
+  LContent, LSlice: string;
+  LUnit: TArtefactInfo;
+
+  function SliceComponent(const AName: string): string;
+  var
+    LNamePos, LStart, LEnd: Integer;
+  begin
+    LNamePos := Pos('<name>' + AName + '</name>', LContent);
+    Assert.IsTrue(LNamePos > 0, AName + ' must be a component');
+    LStart := LNamePos;
+    while (LStart > 1) and (Copy(LContent, LStart, 10) <> '<component') do
+      Dec(LStart);
+    LEnd := PosEx('</component>', LContent, LNamePos);
+    Assert.IsTrue(LEnd > LNamePos, AName + ' component must close');
+    Result := Copy(LContent, LStart, LEnd - LStart);
+  end;
+
+  procedure AddUnit(const AName, AOrigin, ASource: string);
+  begin
+    LUnit := MakeArtefact(AName, 'unit-evidence', 'abcd1234ef', 32);
+    LUnit.Origin := AOrigin;
+    LUnit.SourcePath := ASource;
+    FArtefacts.Add(LUnit);
+  end;
+
+begin
+  FMetadata.Licence := 'MIT';
+  FMetadata.ComponentManifestJson :=
+    '{"components":[{"name":"Wrapped","version":"1","vendor":"A","licence":"Apache-2.0",' +
+    '"type":"library","units_exact":["Data.DB"]}],' +
+    '"own_code_units":["MainForm"],"own_code_prefixes":["App"],' +
+    '"own_code_folders":["' +
+    StringReplace('C:\DXComplyFolderTest\src', '\', '\\', [rfReplaceAll]) + '"]}';
+  FArtefacts.Add(MakeArtefact('TestProject.exe', 'application', 'abcd1234ef', 1024));
+  AddUnit('System.SysUtils.pas', 'Embarcadero RTL', '');
+  AddUnit('Vcl.Forms.pas', 'Embarcadero VCL', '');
+  AddUnit('FMX.Forms.pas', 'Embarcadero FMX', '');
+  AddUnit('MainForm.pas', 'Local project', '');
+  AddUnit('AppSettings.pas', 'Local project', '');
+  AddUnit('Helper.pas', 'Local project', 'C:\DXComplyFolderTest\src\Helper.pas');
+  AddUnit('LocalOnly.pas', 'Local project', '');
+  AddUnit('Data.DB.pas', 'Embarcadero RTL', '');
+  FArtefacts.Add(MakeArtefact('vendor.dll', 'library', 'abcd1234ef', 64));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LContent := LoadOutputContent;
+  Assert.AreEqual(NativeInt(0), NativeInt(Length(CycloneDxXmlSequenceErrors(LContent))),
+    'Unit licences must keep the CycloneDX element order');
+  Assert.IsTrue(FWriter.Validate(LContent));
+
+  LSlice := SliceComponent('TestProject.exe');
+  Assert.IsTrue(Pos('<id>MIT</id>', LSlice) > 0);
+  LSlice := SliceComponent('System.SysUtils.pas');
+  Assert.IsTrue(Pos('<hashes>', LSlice) < Pos('<licenses>', LSlice),
+    'The unit licence follows the hashes');
+  Assert.IsTrue(Pos('<name>Embarcadero RTL</name>', LSlice) > 0);
+  LSlice := SliceComponent('Vcl.Forms.pas');
+  Assert.IsTrue(Pos('<name>Embarcadero VCL</name>', LSlice) > 0);
+  LSlice := SliceComponent('FMX.Forms.pas');
+  Assert.IsTrue(Pos('<name>Embarcadero FMX</name>', LSlice) > 0);
+  Assert.IsTrue(Pos('<id>MIT</id>', SliceComponent('MainForm.pas')) > 0);
+  Assert.IsTrue(Pos('<id>MIT</id>', SliceComponent('AppSettings.pas')) > 0);
+  Assert.IsTrue(Pos('<id>MIT</id>', SliceComponent('Helper.pas')) > 0);
+  Assert.AreEqual(0, Pos('<licenses>', SliceComponent('LocalOnly.pas')));
+  Assert.AreEqual(0, Pos('<licenses>', SliceComponent('vendor.dll')));
+  Assert.AreEqual(0, Pos('<licenses>', SliceComponent('Data.DB.pas')),
+    'A unit matched to a manifest library does not also take the origin label');
+  Assert.IsTrue(Pos('<id>Apache-2.0</id>', SliceComponent('Wrapped')) > 0);
+
+  FMetadata.Licence := '';
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LContent := LoadOutputContent;
+  Assert.AreEqual(0, Pos('<licenses>', SliceComponent('TestProject.exe')));
+  Assert.AreEqual(0, Pos('<licenses>', SliceComponent('MainForm.pas')),
+    'Own code stays without a licence when the product licence is empty');
+  Assert.IsTrue(Pos('<name>Embarcadero RTL</name>',
+    SliceComponent('System.SysUtils.pas')) > 0);
+end;
+
+procedure TCycloneDxXmlWriterTests.Write_DeliverableWithoutVersion_UsesProductVersion;
+var
+  LContent, LSlice: string;
+  LSo, LDll: TArtefactInfo;
+
+  function SliceComponent(const AName: string): string;
+  var
+    LNamePos, LStart, LEnd: Integer;
+  begin
+    LNamePos := Pos('<name>' + AName + '</name>', LContent);
+    Assert.IsTrue(LNamePos > 0, AName + ' must be a component');
+    LStart := LNamePos;
+    while (LStart > 1) and (Copy(LContent, LStart, 10) <> '<component') do
+      Dec(LStart);
+    LEnd := PosEx('</component>', LContent, LNamePos);
+    Assert.IsTrue(LEnd > LNamePos, AName + ' component must close');
+    Result := Copy(LContent, LStart, LEnd - LStart);
+  end;
+
+begin
+  FProjectInfo.ProjectName := 'WernigApp';
+  FMetadata.ProductVersion := '16.0.0.7';
+  FArtefacts.Add(MakeArtefact('libWernigApp.so', 'file', 'abcd1234ef', 1024));
+  LDll := MakeArtefact('vendor.dll', 'library', 'abcd1234ef', 2048);
+  LDll.Version := '9.9.9';
+  FArtefacts.Add(LDll);
+  FArtefacts.Add(MakeArtefact('plugin.dll', 'library', 'abcd1234ef', 512));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LContent := LoadOutputContent;
+  LSlice := SliceComponent('libWernigApp.so');
+  Assert.IsTrue(Pos('<version>16.0.0.7</version>', LSlice) > 0,
+    'A shared library with no version resource uses the product version');
+  Assert.AreEqual(0, Pos(cVersionSourceFileDate, LSlice));
+  Assert.IsTrue(Pos('<version>9.9.9</version>', SliceComponent('vendor.dll')) > 0,
+    'A third-party DLL keeps its own version');
+  Assert.AreEqual(0, Pos('<version>', SliceComponent('plugin.dll')),
+    'A third-party file with no version stays without one');
+
+  FArtefacts.Clear;
+  LSo := MakeArtefact('libWernigApp.so', 'file', 'abcd1234ef', 1024);
+  LSo.Version := '2026-01-01T00:00:00Z';
+  LSo.VersionFromFileDate := True;
+  FArtefacts.Add(LSo);
+  LDll := MakeArtefact('vendor.dll', 'library', 'abcd1234ef', 2048);
+  LDll.Version := '2026-01-02T00:00:00Z';
+  LDll.VersionFromFileDate := True;
+  FArtefacts.Add(LDll);
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LContent := LoadOutputContent;
+  LSlice := SliceComponent('libWernigApp.so');
+  Assert.IsTrue(Pos('<version>16.0.0.7</version>', LSlice) > 0);
+  Assert.AreEqual(0, Pos(cVersionSourceFileDate, LSlice),
+    'The product version is not marked as a file date');
+  LSlice := SliceComponent('vendor.dll');
+  Assert.IsTrue(Pos('<version>2026-01-02T00:00:00Z</version>', LSlice) > 0);
+  Assert.IsTrue(Pos(cVersionSourceFileDate, LSlice) > 0,
+    'A third-party file keeps its file-date version');
 end;
 
 end.

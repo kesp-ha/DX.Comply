@@ -1,4 +1,4 @@
-# DX.Comply — Architecture
+# DX.Comply: Architecture
 
 ## Overview
 
@@ -34,7 +34,7 @@ Every SBOM generation follows the same pipeline, regardless of whether it was tr
                                     │
                                     ▼
                             FileScanner ──► TArtefactList
-                          (output directory scan, SHA-256)
+                          (named output, its directory, SHA-256)
                                     │
                                     ▼
                          ┌──────────┴──────────┐
@@ -47,31 +47,44 @@ Every SBOM generation follows the same pipeline, regardless of whether it was tr
 
 | Unit | Responsibility |
 |------|---------------|
-| `DX.Comply.Engine.pas` | `TDxComplyGenerator` facade — orchestrates the full pipeline |
+| `DX.Comply.Engine.pas` | `TDxComplyGenerator` facade. Orchestrates the full pipeline |
 | `DX.Comply.Engine.Intf.pas` | Shared types: `TProjectInfo`, `TArtefactInfo`, `TSbomMetadata` |
-| `DX.Comply.ProjectScanner.pas` | Regex-based `.dproj` parser — extracts paths, toolchain, version, DllSuffix |
+| `DX.Comply.ComponentManifest.pas` | Optional components.json: match units to libraries, licences, package URLs, and copyright |
+| `DX.Comply.ProjectScanner.pas` | Regex-based `.dproj` parser. Extracts paths, toolchain, version, DllSuffix. The 32-bit Android folder is Android. Android versionName is used when FileVersion is absent |
 | `DX.Comply.BuildOrchestrator.pas` | Plan construction and script-based build execution (used by CLI fallback) |
 | `DX.Comply.BuildEvidence.Reader.pas` | Reads MAP files, compiler CFG/RSP files; collects evidence items |
 | `DX.Comply.MapFile.Reader.pas` | Extracts unit names from MAP segment entries (`M=Unit`) and line-number sections |
+| `DX.Comply.MapFile.LldReader.pas` | Reads the LLD linker map of ARM and LLVM targets (Android, iOS, Linux, macOS ARM): units from `.o` files, native components from `.a` archives |
+| `DX.Comply.LegacyProject.pas` | Reads Delphi 7 and other pre-2007 project data from `.dpr`, `.dpk`, `.bdsproj`, `.dof`, and `.cfg` |
+| `DX.Comply.UsesClauseParser.pas` | Reads uses clauses from Pascal sources |
+| `DX.Comply.DependencyGraph.pas` | Direct uses-clause edges between units already in the SBOM, and which of those units stay on the program |
+| `DX.Comply.LibrarySource.pas` | Collects the source files of a library release for `--library` |
+| `DX.Comply.CraChecks.pas` | Non-fatal CRA and BSI header and component warnings, and the `--strict` result |
+| `DX.Comply.SbomHeaderConfig.pas` | Reads and writes the SBOM header keys of `.dxcomply.json` |
+| `DX.Comply.VersionInfo.pas` | Reads the DX.Comply version from the version resource |
 | `DX.Comply.UnitResolver.pas` | Resolves units to files, classifies origin (RTL/VCL/FMX/Local/ThirdParty), computes SHA-256/SHA-512 hashes |
 | `DX.Comply.HashService.pas` | SHA-256 and SHA-512 via `System.Hash` |
-| `DX.Comply.FileScanner.pas` | Scans build output directory for deliverable artefacts |
-| `DX.Comply.CycloneDx.Writer.pas` | CycloneDX 1.5 JSON output |
-| `DX.Comply.CycloneDx.XmlWriter.pas` | CycloneDX 1.5 XML output |
+| `DX.Comply.FileScanner.pas` | Lists the named project output and binaries in that directory |
+| `DX.Comply.CycloneDx.Writer.pas` | CycloneDX 1.6 JSON output |
+| `DX.Comply.CycloneDx.XmlWriter.pas` | CycloneDX 1.6 XML output |
 | `DX.Comply.Spdx.Writer.pas` | SPDX 2.3 JSON output |
+| `DX.Comply.Spdx3.Writer.pas` | SPDX 3.0.1 JSON-LD output, converted from the SPDX 2.3 document |
 | `DX.Comply.Report.HtmlWriter.pas` | HTML companion report |
 | `DX.Comply.Report.MarkdownWriter.pas` | Markdown companion report |
-| `DX.Comply.Report.Intf.pas` | Report writer interface and shared report types |
+| `DX.Comply.Report.Intf.pas` | Report writer interface and shared report types, including the report content choice |
+| `DX.Comply.Report.Overview.pas` | Origin, supplier, and licence summaries of the reports |
 | `DX.Comply.Report.Support.pas` | Common report helper functions (HTML escaping, formatting) |
 | `DX.Comply.BuildEvidence.Intf.pas` | Build evidence types and interfaces |
-| `DX.Comply.Schema.Validator.pas` | Post-generation SBOM schema validation |
+| `DX.Comply.Schema.Validator.pas` | Post-generation structural check of the SBOM (not an official schema) |
 | `DX.Comply.CLI.Options.pas` | CLI argument parser (`--project`, `--format`, `--map-dir`, etc.) |
 
 ## MAP file generation
 
-DX.Comply always performs a **Deep-Evidence analysis** — using the compiler-generated MAP file to resolve all linked units (PAS/DCU) with their dependencies, SHA-256 hashes, and origin classification. The MAP file is the single source of truth for dependency resolution.
+DX.Comply always performs a **Deep-Evidence analysis**, using the compiler-generated MAP file to resolve linked units (PAS/DCU) with their dependencies, SHA-256 hashes where the file could be opened, and origin classification. The MAP file is the source of truth for dependency resolution.
 
-When a MAP file does not yet exist, DX.Comply can optionally trigger a build with `DCC_MapFile=3` (detailed MAP) to generate one. This is an implementation detail — the analysis quality is identical regardless of how the MAP file was produced.
+Windows targets write the classic Delphi MAP (`DCC_MapFile=3`, Detailed). ARM and LLVM targets (Android, iOS, Linux, macOS ARM) link with LLD and write an LLD map instead. Those targets have no Detailed setting; the map is turned on with Project Options > Linker > Map file ARM > On. Android writes `lib<Project>.so.map`. DX.Comply recognises an LLD map by its header and reads it with `TLldMapReader`.
+
+When a MAP file does not yet exist, DX.Comply can optionally trigger a build with `DCC_MapFile=3` (detailed MAP) to generate one. This is an implementation detail. The analysis quality is the same regardless of how the MAP file was produced.
 
 ### IDE plugin
 
@@ -79,7 +92,7 @@ The IDE plugin compiles the project directly via the OTA (`IOTAProject.ProjectBu
 
 ### CLI tool
 
-The CLI tool does **not** compile the project. It expects the MAP file to already exist — either from a prior build with `DCC_MapFile=3` in the IDE or via MSBuild in a CI pipeline. This design keeps the CLI lightweight and enables support for legacy Delphi versions (including Delphi 7) where no IDE plugin is available.
+The CLI tool does **not** compile the project. It expects the MAP file to already exist, either from a prior build with `DCC_MapFile=3` in the IDE or via MSBuild in a CI pipeline. `--project` may be a `.dproj`, `.dpk`, or `.groupproj`. A Delphi 7 `.dpr` is also accepted when the sibling `.dof` and `.cfg` are present. When a `.dproj` with the same name is next to a `.dpr`, build mode uses the `.dproj` and reports it with an info message. A `.dof` alone is not a project file. This keeps the CLI independent of the IDE.
 
 ## Unit origin classification
 
@@ -87,23 +100,30 @@ Every unit found in the MAP file is classified by origin:
 
 | Origin | Heuristic |
 |--------|-----------|
-| Embarcadero RTL | Resolved path under Delphi root, or namespace `System.*`, `Winapi.*`, `Data.*`, etc. |
-| Embarcadero VCL | Namespace `Vcl.*` or resolved under `\source\vcl\` |
-| Embarcadero FMX | Namespace `Fmx.*` or resolved under `\source\fmx\` |
-| Local project | Resolved path under project directory, or no known Embarcadero namespace |
-| Third party | Resolved path outside both project and Delphi root |
+| Embarcadero RTL | Resolved path in a product source tree under the Delphi root (`source\rtl`, `source\data`, and the other source trees shipped in that folder, other than `source\vcl` and `source\fmx`), or in a product lib folder (`lib\<platform>\release`, `lib\<platform>\debug`, a DCU in `lib\<platform>`, or a DCU placed directly in `lib`), or namespace `System.*`, `Winapi.*`, `Data.*`, etc. for an unresolved unit |
+| Embarcadero VCL | Namespace `Vcl.*` or resolved under `source\vcl` |
+| Embarcadero FMX | Namespace `Fmx.*` or resolved under `source\fmx` |
+| Local project | Resolved path under the project directory or under a project search path outside the Delphi folder, a DCU in the output folder without a source elsewhere in the search path, or no known Embarcadero namespace. A DCU in the output folder takes the origin of its `.pas` when that source is found in the search path |
+| Third party | Resolved path outside the project and outside those product folders. That includes other folders under the Delphi root, such as `Extras`, a GetIt `CatalogRepository` (under the install or under Documents), and a folder added under `source` or `lib`. A manifest row matched by `units_exact`, `units_folder`, or `units_prefix` takes precedence over the install location, so the unit is that component. With no matching row it stays third party and is named on the Unknown supplier row. A unit matched by `own_code_units`, `own_code_prefixes`, or `own_code_folders` is the project's own code and is not counted there |
+
+A unit whose origin is Embarcadero RTL, Embarcadero VCL or Embarcadero FMX carries that label as its licence in the HTML and Markdown reports and in CycloneDX and SPDX. Own-code units carry `product.licence` when it is set. When it is not set, an Embarcadero unit still uses its origin label and other own-code units stay without a licence.
 
 ## SBOM output structure
 
 Each resolved unit is emitted as a CycloneDX `component` with `type: "library"`, carrying:
-- SHA-256 hash of the resolved file
+- SHA-256 and SHA-512 hashes of the resolved file, when the file could be opened
+- `bsi:component:filename`, `bsi:component:executable`, `bsi:component:archive`, and `bsi:component:structured` when the component has a file name
 - `net.developer-experts.dx-comply:origin` property (e.g. "Embarcadero RTL")
 - `net.developer-experts.dx-comply:evidence` property (e.g. "DCU", "PAS", "MAP")
 - `net.developer-experts.dx-comply:confidence` property (e.g. "Strong", "Heuristic")
 
+When `--manifest` or the `manifest` key points at a components file, matched units stay in the document and are linked from one library component (name, version, supplier, licence, package URL, type). The program that was built depends on that library. Own-code rules keep those units with the program. The units come from the MAP file, so a Delphi 7 `.dpr` uses the same list. A row matches by exact name, by prefix, or by `units_folder` (the package directory, including subfolders). `own_code_folders` does the same for the project's own units. Relative folder paths are resolved from the components file. Folder rules use the unit's source path: the `.pas` when the resolver found one, including when the linked file is a DCU in the output directory. A unit known only by name is not matched by a folder. A `units_prefix` matches the start of the unit name, and a trailing dot is not required. The longest prefix wins. The same prefix on two rows assigns the units to the first row in the file and writes a warning that names both rows and the prefix. Matching uses the MAP unit name, including when the file name is only the part after the last dot, so a matched library is still listed when those units are classified as local project code. A match by `units_exact`, `units_folder`, or `units_prefix` also wins over a Delphi install location, so that unit is reported as the component rather than as Embarcadero RTL, VCL or FMX. Matching and licence classification live in `DX.Comply.ComponentManifest.pas`. The CycloneDX and SPDX writers call that unit. An optional `copyright` string on a row is stored with the parsed manifest. Matching ignores it. When the string is set, the writers put it on the library component for that row: CycloneDX `copyright`, SPDX 2.3 `copyrightText`, and SPDX 3.0.1 `software_copyrightText` (SoftwareArtifact `copyrightText`). A row that does not set it leaves that output as it is, including SPDX 2.3 `copyrightText` of `NOASSERTION`. The HTML and Markdown licence summary shows the same text in its own column, and leaves that cell empty when the row does not set it.
+
+CycloneDX 1.6, SPDX 3.0.1 and SPDX 2.3 also carry the BSI TR-03183-2 fields DX.Comply can support from evidence. SHA-512 sits next to SHA-256, and a deployable file also carries that SHA-512 on an external reference of type distribution. The SBOM creator contact is written only from `sbomCreator` or `--sbom-creator`, as `metadata.manufacturer`. SPDX 3.0.1 is written by converting the SPDX 2.3 document in memory, so both SPDX versions share IDs, packages and licences. The built program still depends on runtime packages, then external DLLs, then the linked units that no other unit uses. Where a unit's Pascal source was read, the SBOM also lists the direct uses edges to other units already in the document. A uses B and B uses C writes those two edges, and the program depends on A. A cycle is kept in both directions. System and SysInit stay on the program. Library mode writes those same edges for a shipped `.pas`, `.dpr`, or `.dpk`. Its compositions still describe the file set, not whether every uses name resolved. CycloneDX compositions and SPDX 3.0.1 relationship completeness say which of those sets are complete. A unit with no source, the built program, a runtime package, and an external DLL stay incomplete. Details, including the fields that are left out, are in [BSI-TR-03183-2.md](BSI-TR-03183-2.md). This is not a certification against the technical guideline.
+
 ## Test suite
 
-185 DUnitX tests cover the full pipeline. Run:
+DUnitX tests cover the full pipeline. Run:
 
 ```
 build\Win32\Debug\DX.Comply.Tests.exe --no-pause

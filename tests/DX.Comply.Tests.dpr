@@ -1,4 +1,4 @@
-﻿/// <summary>
+/// <summary>
 /// DX.Comply.Tests
 /// DUnitX console test runner for DX.Comply.
 /// </summary>
@@ -25,25 +25,41 @@ uses
   DUnitX.TestFramework,
   DUnitX.Loggers.Console,
   DUnitX.Loggers.XML.NUnit,
+  DX.Comply.Tests.Paths in 'DX.Comply.Tests.Paths.pas',
   DX.Comply.Tests.BuildEvidence.Intf in 'DX.Comply.Tests.BuildEvidence.Intf.pas',
   DX.Comply.Tests.BuildEvidence.Reader in 'DX.Comply.Tests.BuildEvidence.Reader.pas',
   DX.Comply.Tests.BuildOrchestrator in 'DX.Comply.Tests.BuildOrchestrator.pas',
   DX.Comply.Tests.HashService in 'DX.Comply.Tests.HashService.pas',
   DX.Comply.Tests.FileScanner in 'DX.Comply.Tests.FileScanner.pas',
   DX.Comply.Tests.MapFile.Reader in 'DX.Comply.Tests.MapFile.Reader.pas',
+  DX.Comply.Tests.MapFile.LldReader in 'DX.Comply.Tests.MapFile.LldReader.pas',
   DX.Comply.Tests.ProjectScanner in 'DX.Comply.Tests.ProjectScanner.pas',
+  DX.Comply.Tests.LegacyProject in 'DX.Comply.Tests.LegacyProject.pas',
   DX.Comply.Tests.UnitResolver in 'DX.Comply.Tests.UnitResolver.pas',
   DX.Comply.Tests.CycloneDx.Writer in 'DX.Comply.Tests.CycloneDx.Writer.pas',
   DX.Comply.Tests.CycloneDx.XmlWriter in 'DX.Comply.Tests.CycloneDx.XmlWriter.pas',
   DX.Comply.Tests.Report.MarkdownWriter in 'DX.Comply.Tests.Report.MarkdownWriter.pas',
   DX.Comply.Tests.Report.HtmlWriter in 'DX.Comply.Tests.Report.HtmlWriter.pas',
+  DX.Comply.Tests.Report.Overview in 'DX.Comply.Tests.Report.Overview.pas',
   DX.Comply.Tests.Spdx.Writer in 'DX.Comply.Tests.Spdx.Writer.pas',
+  DX.Comply.Tests.Spdx3.Writer in 'DX.Comply.Tests.Spdx3.Writer.pas',
   DX.Comply.Tests.Schema.Validator in 'DX.Comply.Tests.Schema.Validator.pas',
   DX.Comply.Tests.IDE.Settings in 'DX.Comply.Tests.IDE.Settings.pas',
+  DX.Comply.Tests.IDE.ExpectedMapFile in 'DX.Comply.Tests.IDE.ExpectedMapFile.pas',
   DX.Comply.Tests.IDE.ReadmeSupport in 'DX.Comply.Tests.IDE.ReadmeSupport.pas',
+  DX.Comply.Tests.IDE.UiText in 'DX.Comply.Tests.IDE.UiText.pas',
   DX.Comply.Tests.Engine in 'DX.Comply.Tests.Engine.pas',
   DX.Comply.Tests.CLI.Options in 'DX.Comply.Tests.CLI.Options.pas',
-  DX.Comply.Tests.UsesClauseParser in 'DX.Comply.Tests.UsesClauseParser.pas';
+  DX.Comply.Tests.ComponentManifest in 'DX.Comply.Tests.ComponentManifest.pas',
+  DX.Comply.Tests.BsiTr03183 in 'DX.Comply.Tests.BsiTr03183.pas',
+  DX.Comply.Tests.UsesClauseParser in 'DX.Comply.Tests.UsesClauseParser.pas',
+  DX.Comply.Tests.DependencyGraph in 'DX.Comply.Tests.DependencyGraph.pas',
+  DX.Comply.Tests.VersionInfo in 'DX.Comply.Tests.VersionInfo.pas',
+  DX.Comply.Tests.CraChecks in 'DX.Comply.Tests.CraChecks.pas',
+  DX.Comply.Tests.LibrarySource in 'DX.Comply.Tests.LibrarySource.pas',
+  DX.Comply.Tests.CLI.GitTag in 'DX.Comply.Tests.CLI.GitTag.pas',
+  DX.Comply.Tests.DprojForDpr in 'DX.Comply.Tests.DprojForDpr.pas',
+  DX.Comply.Tests.SbomHeaderConfig in 'DX.Comply.Tests.SbomHeaderConfig.pas';
 
 var
   LRunner: ITestRunner;
@@ -61,6 +77,8 @@ begin
     // Other fixtures register themselves via the initialization section
     // and the [TestFixture] attribute — picked up through LRunner.UseRTTI.
 
+    // Parse DUnitX options (--exitbehavior, --xmlfile, --run)
+    TDUnitX.CheckCommandLine;
     LRunner := TDUnitX.CreateRunner;
     LRunner.UseRTTI := True;
     LLogger := TDUnitXConsoleLogger.Create(True);
@@ -74,8 +92,12 @@ begin
       ExitCode := EXIT_ERRORS;
 
     {$IFNDEF CI}
-    System.Write('Done. Press <Enter> key to quit.');
-    System.Readln;
+    // Only pause when asked to; automated runners pass --exitbehavior:Continue
+    if TDUnitX.Options.ExitBehavior = TDUnitXExitBehavior.Pause then
+    begin
+      System.Write('Done. Press <Enter> key to quit.');
+      System.Readln;
+    end;
     {$ENDIF}
   except
     on E: Exception do

@@ -68,8 +68,11 @@ uses
   System.SysUtils,
   Winapi.ShellAPI,
   Winapi.Windows,
+  Vcl.Imaging.pngimage,
   DX.Comply.IDE.Logger,
-  DX.Comply.IDE.PathSupport;
+  DX.Comply.IDE.PathSupport,
+  DX.Comply.IDE.Resources,
+  DX.Comply.VersionInfo;
 
 type
   /// <summary>
@@ -80,14 +83,6 @@ type
     ProductVersion: string;
   end;
 
-  /// <summary>
-  /// Language/code-page translation entry from a Windows version resource.
-  /// </summary>
-  TTranslationInfo = packed record
-    Language: Word;
-    CodePage: Word;
-  end;
-
 const
   cRepositoryUrl = 'https://github.com/omonien/DX.Comply';
   cCycloneDxUrl = 'https://cyclonedx.org/';
@@ -95,11 +90,10 @@ const
   cCraOverviewUrl = 'https://digital-strategy.ec.europa.eu/en/policies/cyber-resilience-act';
   cCraRegulationUrl = 'https://eur-lex.europa.eu/eli/reg/2024/2847/oj/eng';
   cAboutBodyText =
-    'The EU Cyber Resilience Act (CRA) requires software vendors to document ' +
-    'what is inside their products. DX.Comply generates that Software Bill of ' +
-    'Materials directly from your RAD Studio project, together with optional ' +
-    'human-readable Markdown and HTML reports. You generate it, archive it, ' +
-    'and keep it ready for CRA documentation and audit review workflows.';
+    'DX.Comply lists the units, packages and DLL names it can see in a Delphi ' +
+    'build, with a hash where it could open the file. The SBOM is a starting ' +
+    'point for the SBOM part of EU CRA technical documentation. It does not ' +
+    'make a product compliant.';
   cHeaderBitmapFileName = 'DX.Comply.Icon.bmp';
   cHeaderPngFileName = 'DX.Comply.Icon.png';
 
@@ -109,94 +103,15 @@ begin
     SW_SHOWNORMAL)) > 32;
 end;
 
-function QueryVersionString(const AVersionData: TBytes; const AName: string): string;
-const
-  cFallbackTranslations: array [0 .. 2] of string = ('040704E4', '040904E4', '040904B0');
-var
-  I: Integer;
-  LQueryPath: string;
-  LTextLength: UINT;
-  LTextPointer: PChar;
-  LTranslation: ^TTranslationInfo;
-  LTranslationId: string;
-  LTranslationLength: UINT;
-
-  function TryQueryString(const ATranslationId: string): Boolean;
-  begin
-    LQueryPath := Format('\StringFileInfo\%s\%s', [ATranslationId, AName]);
-    Result := VerQueryValue(@AVersionData[0], PChar(LQueryPath), Pointer(LTextPointer),
-      LTextLength) and (LTextLength > 0);
-    if Result then
-      Result := Trim(string(LTextPointer)) <> '';
-  end;
-
-begin
-  Result := '';
-  if Length(AVersionData) = 0 then
-    Exit;
-
-  if VerQueryValue(@AVersionData[0], '\VarFileInfo\Translation', Pointer(LTranslation),
-    LTranslationLength) and (LTranslationLength >= SizeOf(TTranslationInfo)) then
-  begin
-    LTranslationId := Format('%.4x%.4x', [LTranslation^.Language, LTranslation^.CodePage]);
-    if TryQueryString(LTranslationId) then
-      Exit(Trim(string(LTextPointer)));
-  end;
-
-  for I := Low(cFallbackTranslations) to High(cFallbackTranslations) do
-    if TryQueryString(cFallbackTranslations[I]) then
-      Exit(Trim(string(LTextPointer)));
-end;
-
-function QueryFixedProductVersion(const AVersionData: TBytes): string;
-var
-  LVersionInfo: PVSFixedFileInfo;
-  LVersionLength: UINT;
-begin
-  Result := '';
-  if (Length(AVersionData) = 0) or
-    not VerQueryValue(@AVersionData[0], '\', Pointer(LVersionInfo), LVersionLength) or
-    (LVersionLength < SizeOf(VS_FIXEDFILEINFO)) then
-    Exit;
-
-  Result := Format('%d.%d.%d.%d', [
-    HiWord(LVersionInfo^.dwProductVersionMS),
-    LoWord(LVersionInfo^.dwProductVersionMS),
-    HiWord(LVersionInfo^.dwProductVersionLS),
-    LoWord(LVersionInfo^.dwProductVersionLS)]);
-end;
-
 function ReadCurrentPackageVersionInfo: TPackageVersionInfo;
-var
-  LDummyHandle: DWORD;
-  LModuleFilePath: string;
-  LVersionData: TBytes;
-  LVersionDataSize: DWORD;
 begin
-  Result.CompanyName := 'Olaf Monien';
-  Result.ProductVersion := '1.0.0.0';
-
-  LModuleFilePath := GetDXComplyModuleFilePath;
-  if LModuleFilePath = '' then
-    Exit;
-
-  LVersionDataSize := GetFileVersionInfoSize(PChar(LModuleFilePath), LDummyHandle);
-  if LVersionDataSize = 0 then
-    Exit;
-
-  SetLength(LVersionData, LVersionDataSize);
-  if not GetFileVersionInfo(PChar(LModuleFilePath), 0, LVersionDataSize, @LVersionData[0]) then
-    Exit;
-
-  Result.CompanyName := QueryVersionString(LVersionData, 'CompanyName');
+  // HInstance is the IDE BPL when this unit is linked into the design package.
+  Result.CompanyName := GetModuleVersionString(HInstance, 'CompanyName');
   if Result.CompanyName = '' then
     Result.CompanyName := 'Olaf Monien';
 
-  Result.ProductVersion := QueryVersionString(LVersionData, 'ProductVersion');
-  if Result.ProductVersion = '' then
-    Result.ProductVersion := QueryFixedProductVersion(LVersionData);
-  if Result.ProductVersion = '' then
-    Result.ProductVersion := '1.0.0.0';
+  // Empty when the BPL has no version resource. Do not invent 1.0.0.0.
+  Result.ProductVersion := GetModuleProductVersion(HInstance);
 end;
 
 procedure TFormDXComplyAboutDialog.ConfigureLinkLabel(ALabel: TLabel;
@@ -217,9 +132,8 @@ begin
   BodyLabel.Caption := cAboutBodyText;
 
   LVersionInfo := ReadCurrentPackageVersionInfo;
-  VersionLabel.Caption := Format('Version %s · %s', [
-    LVersionInfo.ProductVersion,
-    LVersionInfo.CompanyName]);
+  VersionLabel.Caption := FormatDXComplyVersionCaption(LVersionInfo.ProductVersion,
+    LVersionInfo.CompanyName);
 
   ConfigureLinkLabel(RepositoryLinkLabel, cRepositoryUrl);
   ConfigureLinkLabel(CycloneDxLinkLabel, cCycloneDxUrl);
@@ -246,7 +160,42 @@ end;
 procedure TFormDXComplyAboutDialog.LoadHeaderGraphic;
 var
   LAssetPath: string;
+  LBytes: TBytes;
+  LPng: TPngImage;
+  LStream: TBytesStream;
 begin
+  try
+    if TryLoadDXComplyResourceBytes(HInstance, cDXComplyIconBmpResource, LBytes) then
+    begin
+      LStream := TBytesStream.Create(LBytes);
+      try
+        HeaderIconImage.Picture.Bitmap.LoadFromStream(LStream);
+        Exit;
+      finally
+        LStream.Free;
+      end;
+    end;
+  except
+    // Try the PNG resource, then a file in a development checkout.
+  end;
+
+  try
+    if TryLoadDXComplyResourceBytes(HInstance, cDXComplyIconPngResource, LBytes) then
+    begin
+      LStream := TBytesStream.Create(LBytes);
+      LPng := TPngImage.Create;
+      try
+        LPng.LoadFromStream(LStream);
+        HeaderIconImage.Picture.Assign(LPng);
+        Exit;
+      finally
+        LPng.Free;
+        LStream.Free;
+      end;
+    end;
+  except
+  end;
+
   LAssetPath := FindDXComplyAssetFile(cHeaderBitmapFileName);
   if LAssetPath = '' then
     LAssetPath := FindDXComplyAssetFile(cHeaderPngFileName);

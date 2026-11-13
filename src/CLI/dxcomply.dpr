@@ -1,0 +1,225 @@
+﻿/// <summary>
+/// dxcomply
+/// Command-line entry point for DX.Comply SBOM generation in CI/CD workflows.
+/// </summary>
+///
+/// <remarks>
+/// Parses command-line arguments via TCliOptions, constructs a
+/// TDxComplyGenerator with the resulting TSbomConfig, and writes the SBOM to
+/// the requested output path so pipeline runs do not depend on the IDE plugin.
+///
+/// Exit codes:
+///   0 - SBOM generated successfully
+///   1 - Generation failed
+///   2 - Invalid arguments
+///   3 - SBOM generated, but --strict is set and a CRA/BSI warning was raised
+/// </remarks>
+///
+/// <copyright>
+/// Copyright © 2026 Olaf Monien
+/// Licensed under MIT
+/// </copyright>
+
+program dxcomply;
+
+{$APPTYPE CONSOLE}
+
+{$R 'dxcomply.res'}
+
+uses
+  DX.Comply.Locale.EN, // Must be first — forces English RTL messages
+  System.SysUtils,
+  DX.Comply.Engine,
+  DX.Comply.Engine.Intf,
+  DX.Comply.CLI.Options in 'DX.Comply.CLI.Options.pas',
+  DX.Comply.CLI.GitTag in 'DX.Comply.CLI.GitTag.pas';
+
+const
+  cExitStrictWarnings = 3;
+
+// ---------------------------------------------------------------------------
+// Progress callback — negative progress signals an error
+// ---------------------------------------------------------------------------
+
+procedure OnProgress(const AMessage: string; const AProgress: Integer);
+begin
+  if AProgress < 0 then
+    Writeln('[ERROR] ', AMessage)
+  else if AProgress = 100 then
+    Writeln('[DONE ] ', AMessage)
+  else if AMessage.StartsWith('Warning:', True) then
+    Writeln('[WARN ] ', AMessage)
+  else if AMessage.StartsWith('Info: ', True) then
+    Writeln('[INFO ] ', AMessage.Substring(Length('Info: ')))
+  else
+    Writeln(Format('[%3d%%] %s', [AProgress, AMessage]));
+end;
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+var
+  LOptions: TCliOptions;
+  LGenerator: TDxComplyGenerator;
+  LConfig: TSbomConfig;
+  LSuccess: Boolean;
+  LVerbose: Boolean;
+  LLibraryWithoutProject: Boolean;
+  LFileConfig: TSbomConfig;
+  LPeek: TDxComplyGenerator;
+  LGitTagWarning: string;
+  LConfigResolution: TConfigPathResolution;
+  LConfigWarning: string;
+  {$IFNDEF CI}
+  LNoPause: Boolean;
+  {$ENDIF}
+
+begin
+  LOptions := TCliOptions.Create;
+  try
+    if not LOptions.Parse then
+    begin
+      if LOptions.ParseError <> '' then
+      begin
+        Writeln('Error: ', LOptions.ParseError);
+        Writeln(TCliOptions.UsageHint);
+        ExitCode := 2;
+        Exit;
+      end;
+    end;
+
+    if LOptions.Help then
+    begin
+      LOptions.PrintHelp;
+      Exit;
+    end;
+
+    // A relative config path used to be TFile.Exists against the working
+    // directory only. A batch file started elsewhere then ignored the
+    // .dxcomply.json next to the project. The folder of dxcomply.exe is
+    // not searched. The warning is not a CRA/BSI warning, so --strict still
+    // exits with code 3 only when one of those warnings was raised.
+    LConfigResolution := TCliOptions.ResolveConfigPath(
+      LOptions.ConfigFile, LOptions.Project);
+    LConfigWarning := TCliOptions.ConfigFileWarning(LOptions.CiMode, LConfigResolution);
+    if LConfigWarning <> '' then
+      Writeln(LConfigWarning);
+
+    if LOptions.Project = '' then
+    begin
+      // --library and --source-dir on the command line are enough.
+      // With --ci the same keys may be present only in the config file.
+      LConfig := LOptions.ToSbomConfig;
+      LLibraryWithoutProject := LConfig.LibraryMode and
+        (Length(LConfig.SourceDirs) > 0);
+      if (not LLibraryWithoutProject) and LOptions.CiMode and
+         LConfigResolution.Found then
+      begin
+        LPeek := TDxComplyGenerator.Create;
+        try
+          LFileConfig := LPeek.LoadConfig(LConfigResolution.Path);
+        finally
+          LPeek.Free;
+        end;
+        if scoLibraryMode in LConfig.ExplicitOverrides then
+          LFileConfig.LibraryMode := LConfig.LibraryMode;
+        if scoSourceDirs in LConfig.ExplicitOverrides then
+          LFileConfig.SourceDirs := LConfig.SourceDirs;
+        LLibraryWithoutProject := LFileConfig.LibraryMode and
+          (Length(LFileConfig.SourceDirs) > 0);
+      end;
+      if not LLibraryWithoutProject then
+      begin
+        Writeln('Error: --project is required.');
+        Writeln(TCliOptions.UsageHint);
+        ExitCode := 2;
+        Exit;
+      end;
+    end;
+
+    {$IFNDEF CI}
+    // Capture before the try/finally so it is accessible after LOptions.Free.
+    LNoPause := LOptions.NoPause;
+    {$ENDIF}
+    // Capture verbose flag before LOptions is freed.
+    LVerbose := LOptions.Verbose;
+    LConfig  := LOptions.ToSbomConfig;
+
+    // --version-from-git-tag: an explicit --version still wins. Without git
+    // or a tag the warning is printed and the usual version source is used.
+    if LOptions.VersionFromGitTag then
+    begin
+      if ApplyVersionFromGitTag(LConfig, LOptions.GitTagDirectory, LGitTagWarning) then
+      begin
+        if LVerbose then
+          Writeln('Version from git tag: ', LConfig.ProductVersion);
+      end
+      else if LGitTagWarning <> '' then
+        OnProgress(LGitTagWarning, 0);
+    end;
+
+    LGenerator := TDxComplyGenerator.Create(LConfig);
+    try
+      LGenerator.OnProgress :=
+        procedure(const AMessage: string; const AProgress: Integer)
+        begin
+          // Without --verbose only errors, warnings and the final done
+          // message are printed. Warnings (e.g. the Deep-Evidence rebuild
+          // was skipped) must always reach the user — issue #29/#31.
+          if LVerbose
+            or (AProgress < 0)
+            or (AProgress = 100)
+            or AMessage.StartsWith('Warning:', True)
+            or AMessage.StartsWith('Info: ', True)
+            or AMessage.StartsWith('[WARN', True) then
+            OnProgress(AMessage, AProgress);
+        end;
+
+      // With --ci, the file fills defaults and any flag the user actually
+      // passed (recorded on TSbomConfig.ExplicitOverrides) wins. Issue #50.
+      if LOptions.CiMode and LConfigResolution.Found then
+      begin
+        LSuccess := LGenerator.GenerateFromConfig(LOptions.Project, LConfigResolution.Path);
+        LConfig := LGenerator.Config;
+      end
+      else
+        LSuccess := LGenerator.Generate(LOptions.Project, LConfig.OutputPath, LConfig.Format);
+
+      if LSuccess then
+      begin
+        Writeln('SBOM generated: ', LConfig.OutputPath);
+        ExitCode := 0;
+        // Issue #111: the SBOM and report are written, then strict mode fails
+        // the run on any CRA/BSI warning with its own exit code.
+        var LCraWarnings := LGenerator.CraWarnings;
+        if LConfig.StrictMode and (Length(LCraWarnings) > 0) then
+        begin
+          Writeln(Format('Strict mode: %d CRA/BSI warning(s):', [Length(LCraWarnings)]));
+          for var LWarning in LCraWarnings do
+          begin
+            Writeln('  - ', LWarning);
+          end;
+          ExitCode := cExitStrictWarnings;
+        end;
+      end
+      else
+      begin
+        Writeln('Error: SBOM generation failed.');
+        ExitCode := 1;
+      end;
+    finally
+      LGenerator.Free;
+    end;
+  finally
+    LOptions.Free;
+  end;
+
+  {$IFNDEF CI}
+  if not LNoPause then
+  begin
+    Write('Press <Enter> to quit.');
+    Readln;
+  end;
+  {$ENDIF}
+end.

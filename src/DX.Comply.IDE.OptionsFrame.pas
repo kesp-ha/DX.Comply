@@ -4,8 +4,9 @@
 /// </summary>
 ///
 /// <remarks>
-/// The frame uses a regular DFM-backed layout so RAD Studio can apply its normal
-/// DPI scaling behavior consistently inside the Tools &gt; Options host dialog.
+/// The frame uses a DFM layout of aligned rows so RAD Studio can scale it with
+/// the IDE DPI. Edits fill the space between the label and any button, so a
+/// Browse button is never covered when the options page is narrow or at 150%.
 /// </remarks>
 ///
 /// <copyright>
@@ -38,26 +39,52 @@ type
     FSettingsTabSheet: TTabSheet;
     FInfoTabSheet: TTabSheet;
     FReadmeBrowserHostPanel: TPanel;
+    FSettingsScrollBox: TScrollBox;
     FPromptBeforeBuildCheckBox: TCheckBox;
     FSaveAllModifiedFilesCheckBox: TCheckBox;
     FUseActiveBuildConfigurationCheckBox: TCheckBox;
     FOpenHtmlReportAfterGenerateCheckBox: TCheckBox;
     FWarnWhenCompositionEmptyCheckBox: TCheckBox;
     FContinueOnBuildFailureCheckBox: TCheckBox;
+    FBuildScriptRowPanel: TPanel;
+    BuildScriptPathLabel: TLabel;
+    FBuildScriptPathEdit: TEdit;
+    FBrowseScriptButton: TButton;
+    FDelphiVersionRowPanel: TPanel;
+    DelphiVersionLabel: TLabel;
+    FDelphiVersionEdit: TEdit;
     FReportEnabledCheckBox: TCheckBox;
+    FReportFormatRowPanel: TPanel;
     ReportFormatLabel: TLabel;
     FReportFormatComboBox: TComboBox;
+    FReportContentRowPanel: TPanel;
+    ReportContentLabel: TLabel;
+    FReportContentComboBox: TComboBox;
+    FOutputDirRowPanel: TPanel;
+    OutputDirLabel: TLabel;
+    FOutputDirEdit: TEdit;
+    FBrowseOutputDirButton: TButton;
+    FReportOutputRowPanel: TPanel;
     ReportOutputBasePathLabel: TLabel;
     FReportOutputBasePathEdit: TEdit;
     FReportIncludeWarningsCheckBox: TCheckBox;
     FReportIncludeCompositionCheckBox: TCheckBox;
     FReportIncludeBuildEvidenceCheckBox: TCheckBox;
+    FReportGroupByFolderCheckBox: TCheckBox;
+    FAboutRowPanel: TPanel;
     FAboutButton: TButton;
   private
     FReadmeBrowser: TWebBrowser;
     procedure AboutButtonClick(Sender: TObject);
+    procedure BrowseOutputDirButtonClick(Sender: TObject);
+    procedure BrowseScriptButtonClick(Sender: TObject);
     procedure InitializeReadmeBrowser;
     procedure LoadReadmeInfoPage;
+    /// <summary>
+    /// Creates the README browser the first time the info tab is shown.
+    /// </summary>
+    procedure EnsureReadmePreview;
+    procedure PageControlChange(Sender: TObject);
     /// <summary>
     /// Returns the cached temporary HTML file used by the embedded README preview.
     /// </summary>
@@ -103,7 +130,26 @@ begin
   inherited Create(AOwner);
   Align := alClient;
   FAboutButton.OnClick := AboutButtonClick;
+  FBrowseOutputDirButton.OnClick := BrowseOutputDirButtonClick;
+  FBrowseScriptButton.OnClick := BrowseScriptButtonClick;
   FPageControl.ActivePage := FSettingsTabSheet;
+  // The README browser is not created here. A TWebBrowser that navigates
+  // while the frame is created outside the Options dialog (IDE Insight
+  // indexing) can take the focus from the IDE main window. Issue #66.
+  FPageControl.OnChange := PageControlChange;
+end;
+
+procedure TFrameDXComplyOptions.PageControlChange(Sender: TObject);
+begin
+  EnsureReadmePreview;
+end;
+
+procedure TFrameDXComplyOptions.EnsureReadmePreview;
+begin
+  if not DXComplyShouldLoadReadmePreview(
+    FPageControl.ActivePage = FInfoTabSheet, Showing,
+    Assigned(FReadmeBrowser)) then
+    Exit;
   InitializeReadmeBrowser;
   LoadReadmeInfoPage;
 end;
@@ -111,6 +157,41 @@ end;
 procedure TFrameDXComplyOptions.AboutButtonClick(Sender: TObject);
 begin
   ShowDXComplyAboutDialog;
+end;
+
+procedure TFrameDXComplyOptions.BrowseOutputDirButtonClick(Sender: TObject);
+var
+  LDialog: TFileOpenDialog;
+  LCurrent: string;
+begin
+  LDialog := TFileOpenDialog.Create(Self);
+  try
+    LDialog.Title := 'SBOM and report directory';
+    LDialog.Options := [fdoPickFolders, fdoForceFileSystem];
+    LCurrent := Trim(FOutputDirEdit.Text);
+    if (LCurrent <> '') and TDirectory.Exists(LCurrent) then
+      LDialog.DefaultFolder := LCurrent;
+    if LDialog.Execute then
+      FOutputDirEdit.Text := LDialog.FileName;
+  finally
+    LDialog.Free;
+  end;
+end;
+
+procedure TFrameDXComplyOptions.BrowseScriptButtonClick(Sender: TObject);
+var
+  LDialog: TOpenDialog;
+begin
+  LDialog := TOpenDialog.Create(Self);
+  try
+    LDialog.Title := 'Build script path override';
+    LDialog.Filter := 'PowerShell scripts (*.ps1)|*.ps1|All files (*.*)|*.*';
+    LDialog.FileName := FBuildScriptPathEdit.Text;
+    if LDialog.Execute then
+      FBuildScriptPathEdit.Text := LDialog.FileName;
+  finally
+    LDialog.Free;
+  end;
 end;
 
 procedure TFrameDXComplyOptions.InitializeReadmeBrowser;
@@ -148,6 +229,11 @@ begin
   FOpenHtmlReportAfterGenerateCheckBox.Checked := ASettings.OpenHtmlReportAfterGenerate;
   FWarnWhenCompositionEmptyCheckBox.Checked := ASettings.WarnWhenCompositionEvidenceIsEmpty;
   FContinueOnBuildFailureCheckBox.Checked := ASettings.ContinueWithoutDeepEvidenceOnBuildFailure;
+  FBuildScriptPathEdit.Text := ASettings.BuildScriptPath;
+  if ASettings.DelphiVersionOverride = 0 then
+    FDelphiVersionEdit.Text := ''
+  else
+    FDelphiVersionEdit.Text := IntToStr(ASettings.DelphiVersionOverride);
   FReportEnabledCheckBox.Checked := ASettings.HumanReadableReport.Enabled;
   case ASettings.HumanReadableReport.Format of
     hrfHtml: FReportFormatComboBox.ItemIndex := 1;
@@ -155,13 +241,19 @@ begin
   else
     FReportFormatComboBox.ItemIndex := 0;
   end;
+  // Issue #126: the combo box items follow THumanReadableReportContent.
+  FReportContentComboBox.ItemIndex := Ord(ASettings.HumanReadableReport.Content);
+  FOutputDirEdit.Text := ASettings.OutputDir;
   FReportOutputBasePathEdit.Text := ASettings.HumanReadableReport.OutputBasePath;
   FReportIncludeWarningsCheckBox.Checked := ASettings.HumanReadableReport.IncludeWarnings;
   FReportIncludeCompositionCheckBox.Checked := ASettings.HumanReadableReport.IncludeCompositionEvidence;
   FReportIncludeBuildEvidenceCheckBox.Checked := ASettings.HumanReadableReport.IncludeBuildEvidence;
+  FReportGroupByFolderCheckBox.Checked := ASettings.HumanReadableReport.GroupByFolder;
 end;
 
 function TFrameDXComplyOptions.SaveSettings: TDXComplyIDESettings;
+var
+  LVersionText: string;
 begin
   Result := TDXComplyIDESettings.Default;
   Result.AutoBuildMode := abmAlways;
@@ -169,8 +261,15 @@ begin
   Result.SaveAllModifiedFilesBeforeBuild := FSaveAllModifiedFilesCheckBox.Checked;
   Result.UseActiveBuildConfiguration := FUseActiveBuildConfigurationCheckBox.Checked;
   Result.ContinueWithoutDeepEvidenceOnBuildFailure := FContinueOnBuildFailureCheckBox.Checked;
+  Result.BuildScriptPath := Trim(FBuildScriptPathEdit.Text);
+  LVersionText := Trim(FDelphiVersionEdit.Text);
+  if LVersionText = '' then
+    Result.DelphiVersionOverride := 0
+  else
+    Result.DelphiVersionOverride := StrToIntDef(LVersionText, -1);
   Result.OpenHtmlReportAfterGenerate := FOpenHtmlReportAfterGenerateCheckBox.Checked;
   Result.WarnWhenCompositionEvidenceIsEmpty := FWarnWhenCompositionEmptyCheckBox.Checked;
+  Result.OutputDir := Trim(FOutputDirEdit.Text);
   Result.HumanReadableReport.Enabled := FReportEnabledCheckBox.Checked;
   case FReportFormatComboBox.ItemIndex of
     1: Result.HumanReadableReport.Format := hrfHtml;
@@ -178,16 +277,43 @@ begin
   else
     Result.HumanReadableReport.Format := hrfMarkdown;
   end;
+  if FReportContentComboBox.ItemIndex in [Ord(Low(THumanReadableReportContent))..Ord(High(THumanReadableReportContent))] then
+    Result.HumanReadableReport.Content := THumanReadableReportContent(FReportContentComboBox.ItemIndex)
+  else
+    Result.HumanReadableReport.Content := hrcAll;
   Result.HumanReadableReport.OutputBasePath := Trim(FReportOutputBasePathEdit.Text);
   Result.HumanReadableReport.IncludeWarnings := FReportIncludeWarningsCheckBox.Checked;
   Result.HumanReadableReport.IncludeCompositionEvidence := FReportIncludeCompositionCheckBox.Checked;
   Result.HumanReadableReport.IncludeBuildEvidence := FReportIncludeBuildEvidenceCheckBox.Checked;
+  Result.HumanReadableReport.GroupByFolder := FReportGroupByFolderCheckBox.Checked;
 end;
 
 function TFrameDXComplyOptions.ValidateSettings(out AMessage: string): Boolean;
+var
+  LScriptPath: string;
+  LVersion: Integer;
+  LVersionText: string;
 begin
   AMessage := '';
   Result := True;
+
+  LVersionText := Trim(FDelphiVersionEdit.Text);
+  if LVersionText = '' then
+    LVersion := 0
+  else
+    LVersion := StrToIntDef(LVersionText, -1);
+  if LVersion < 0 then
+  begin
+    AMessage := 'The Delphi version override must be 0 or a positive integer.';
+    Exit(False);
+  end;
+
+  LScriptPath := Trim(FBuildScriptPathEdit.Text);
+  if (LScriptPath <> '') and not TFile.Exists(LScriptPath) then
+  begin
+    AMessage := 'The configured build script path does not exist: ' + LScriptPath;
+    Exit(False);
+  end;
 end;
 
 end.

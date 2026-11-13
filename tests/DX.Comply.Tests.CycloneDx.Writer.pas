@@ -4,7 +4,7 @@
 /// </summary>
 ///
 /// <remarks>
-/// Verifies CycloneDX 1.5 JSON output: required top-level fields,
+/// Verifies CycloneDX 1.6 JSON output: required top-level fields,
 /// component entries, hash embedding, metadata, dependency section,
 /// serial-number uniqueness, validation logic, and edge cases such as
 /// supplier names that contain characters requiring JSON escaping.
@@ -25,10 +25,13 @@ uses
   System.Classes,
   System.JSON,
   System.Generics.Collections,
+  System.DateUtils,
+  System.RegularExpressions,
   Winapi.Windows,
   DUnitX.TestFramework,
   DX.Comply.CycloneDx.Writer,
-  DX.Comply.Engine.Intf;
+  DX.Comply.Engine.Intf,
+  DX.Comply.VersionInfo;
 
 type
   /// <summary>
@@ -61,6 +64,13 @@ type
     [Test]
     procedure Write_EmptyArtefacts_CreatesValidFile;
 
+    /// <summary>
+    /// JSON output starts with "{", not with a UTF-8 byte order mark
+    /// (RFC 8259 section 8.1). Strict JSON parsers reject a leading mark.
+    /// </summary>
+    [Test]
+    procedure Write_Output_HasNoByteOrderMark;
+
     /// <summary>Top-level required CycloneDX fields must be present.</summary>
     [Test]
     procedure Write_EmptyArtefacts_HasRequiredFields;
@@ -89,6 +99,21 @@ type
     [Test]
     procedure Write_MetadataContainsTimestamp;
 
+    /// <summary>An offset timestamp is written as UTC with a Z suffix.</summary>
+    [Test]
+    procedure Write_OffsetTimestamp_IsUtcZ;
+
+    /// <summary>
+    /// An empty timestamp becomes the current UTC time with a Z suffix.
+    /// The check compares UTC with UTC, so the machine time zone does not matter.
+    /// </summary>
+    [Test]
+    procedure Write_EmptyTimestamp_IsCurrentUtcZ;
+
+    /// <summary>FormatUtcTimestamp converts offsets and drops fractions.</summary>
+    [Test]
+    procedure FormatUtcTimestamp_ConvertsOffsets;
+
     /// <summary>metadata.tools must be present in the output JSON.</summary>
     [Test]
     procedure Write_MetadataContainsToolInfo;
@@ -100,6 +125,47 @@ type
     /// <summary>A dependencies array must be present in the output JSON.</summary>
     [Test]
     procedure Write_DependenciesSection_Exists;
+
+    /// <summary>
+    /// With a deliverable, a runtime package and an external DLL, the
+    /// project and the deliverable must both be dependsOn parents.
+    /// Issue #42.
+    /// </summary>
+    [Test]
+    procedure Write_Dependencies_GroupedWhenPackagesAndExternalRefsPresent;
+
+    /// <summary>
+    /// A package output must be the deliverable. A runtime package of
+    /// the same extension must stay a dependency of that deliverable.
+    /// </summary>
+    [Test]
+    procedure Write_Dependencies_PackageTargetPreferredOverRuntimePackage;
+
+    /// <summary>
+    /// Without an exe, dll or bpl deliverable the project keeps a direct
+    /// edge to every component.
+    /// </summary>
+    [Test]
+    procedure Write_Dependencies_WithoutDeliverable_ProjectDependsOnAll;
+
+    /// <summary>
+    /// A source-scanned DLL with no file on disk must keep evidence,
+    /// confidence and the conditional property. Issue #45.
+    /// </summary>
+    [Test]
+    procedure Write_ExternalDll_MissingFile_KeepsEvidenceAndConditional;
+    /// <summary>
+    /// A DLL found in the output directory carries size, both hashes and
+    /// locationSource. Issue #59.
+    /// </summary>
+    [Test]
+    procedure Write_ExternalDll_InOutputDir_HasSizeHashesAndLocationSource;
+    /// <summary>
+    /// A DLL found only in a system directory carries its location but no
+    /// hash and no size. Issue #59.
+    /// </summary>
+    [Test]
+    procedure Write_ExternalDll_SystemDir_HasLocationButNoHash;
 
     /// <summary>The output file must contain valid parseable JSON.</summary>
     [Test]
@@ -132,6 +198,45 @@ type
     /// <summary>CLI --version override (Metadata.ProductVersion) must appear in metadata.component.version.</summary>
     [Test]
     procedure Write_VersionOverride_AppearsInComponentVersion;
+
+    /// <summary>The tools entry must use the running module version when metadata does not override it.</summary>
+    [Test]
+    procedure Write_ToolVersion_ComesFromModule;
+
+    /// <summary>An explicit metadata tool version must be written as supplied.</summary>
+    [Test]
+    procedure Write_ToolVersion_UsesMetadataOverride;
+
+    /// <summary>
+    /// The product licence is metadata.component.licenses.
+    /// An empty licence writes no licenses element.
+    /// </summary>
+    [Test]
+    procedure Write_RootLicence_OnMetadataComponent;
+    [Test]
+    procedure Write_ProductLicence_OnBuiltProgramOnly;
+    /// <summary>
+    /// The project output file keeps the product licence when its type is
+    /// not application, library, or package. A second copy of that file
+    /// does too. A neighboring application does not (issue #155).
+    /// </summary>
+    [Test]
+    procedure Write_ProductLicence_OnUntypedProjectExe;
+    /// <summary>
+    /// Embarcadero units carry their origin label. Own-code units carry the
+    /// product licence. A third-party unit and a neighboring file do not.
+    /// Issues #165 and #166.
+    /// </summary>
+    [Test]
+    procedure Write_UnitLicences_EmbarcaderoAndOwnCode;
+    /// <summary>
+    /// The built program with no version of its own uses the product version.
+    /// A shared library with no version resource is that case. A third-party
+    /// file keeps its own version, or none. A file-date stand-in on the
+    /// built program is replaced. A real version on that file is kept.
+    /// </summary>
+    [Test]
+    procedure Write_DeliverableWithoutVersion_UsesProductVersion;
   end;
 
 implementation
@@ -150,9 +255,11 @@ begin
   FMetadata.ProductName    := 'TestApp';
   FMetadata.ProductVersion := '1.0.0';
   FMetadata.Supplier       := 'Test Supplier';
+  FMetadata.SupplierUrl    := '';
+  FMetadata.Licence        := '';
   FMetadata.Timestamp      := '2026-01-01T00:00:00';
   FMetadata.ToolName       := 'DX.Comply';
-  FMetadata.ToolVersion    := '1.0.0';
+  FMetadata.ToolVersion    := '';
 
   FProjectInfo := TProjectInfo.Create;
   FProjectInfo.ProjectName := 'TestApp';
@@ -197,7 +304,7 @@ begin
     'GetFormat must return sfCycloneDxJson');
 end;
 
-// ---- Write — file creation --------------------------------------------------
+// ---- Write: file creation --------------------------------------------------
 
 procedure TCycloneDxWriterTests.Write_EmptyArtefacts_CreatesValidFile;
 var
@@ -206,6 +313,17 @@ begin
   LResult := FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
   Assert.IsTrue(LResult, 'Write must return True on success');
   Assert.IsTrue(TFile.Exists(FOutputFile), 'Output file must exist after Write');
+end;
+
+procedure TCycloneDxWriterTests.Write_Output_HasNoByteOrderMark;
+var
+  LBytes: TBytes;
+begin
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LBytes := TFile.ReadAllBytes(FOutputFile);
+  Assert.IsTrue(Length(LBytes) > 0, 'Output must not be empty');
+  Assert.AreEqual(NativeInt(Ord('{')), NativeInt(LBytes[0]),
+    'The file must start with "{", not with a byte order mark');
 end;
 
 procedure TCycloneDxWriterTests.Write_EmptyArtefacts_HasRequiredFields;
@@ -218,8 +336,11 @@ begin
   try
     Assert.AreEqual('CycloneDX', LJson.GetValue<string>('bomFormat'),
       'bomFormat must be CycloneDX');
-    Assert.AreEqual('1.5', LJson.GetValue<string>('specVersion'),
-      'specVersion must be 1.5');
+    Assert.AreEqual('1.6', LJson.GetValue<string>('specVersion'),
+      'specVersion must be 1.6');
+    Assert.AreEqual('http://cyclonedx.org/schema/bom-1.6.schema.json',
+      LJson.GetValue<string>('$schema'),
+      '$schema must point at the CycloneDX 1.6 JSON schema');
     Assert.IsNotNull(LJson.GetValue('components'),
       'components array must be present');
     Assert.IsNotNull(LJson.GetValue('metadata'),
@@ -231,7 +352,7 @@ begin
   end;
 end;
 
-// ---- Write — component contents ---------------------------------------------
+// ---- Write: component contents ---------------------------------------------
 
 procedure TCycloneDxWriterTests.Write_WithArtefact_ComponentInOutput;
 var
@@ -343,7 +464,7 @@ begin
   end;
 end;
 
-// ---- Write — metadata -------------------------------------------------------
+// ---- Write: metadata -------------------------------------------------------
 
 procedure TCycloneDxWriterTests.Write_MetadataContainsTimestamp;
 var
@@ -358,9 +479,64 @@ begin
     Assert.IsNotNull(LMeta, 'metadata object must be present');
     Assert.IsNotNull(LMeta.GetValue('timestamp'),
       'metadata.timestamp must be present');
+    // A value without a zone is read as UTC and written with a Z suffix,
+    // the same as SPDX creationInfo.created.
+    Assert.AreEqual('2026-01-01T00:00:00Z', LMeta.GetValue<string>('timestamp'),
+      'metadata.timestamp must be UTC with a Z suffix');
   finally
     LJson.Free;
   end;
+end;
+
+procedure TCycloneDxWriterTests.Write_OffsetTimestamp_IsUtcZ;
+var
+  LJson, LMeta: TJSONObject;
+begin
+  FMetadata.Timestamp := '2026-10-10T10:31:18.250+02:00';
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LMeta := LJson.GetValue('metadata') as TJSONObject;
+    Assert.AreEqual('2026-10-10T08:31:18Z', LMeta.GetValue<string>('timestamp'));
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_EmptyTimestamp_IsCurrentUtcZ;
+var
+  LJson, LMeta: TJSONObject;
+  LValue: string;
+  LWritten, LNowUtc: TDateTime;
+begin
+  FMetadata.Timestamp := '';
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LMeta := LJson.GetValue('metadata') as TJSONObject;
+    LValue := LMeta.GetValue<string>('timestamp');
+    Assert.IsTrue(TRegEx.IsMatch(LValue, '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'),
+      'metadata.timestamp must be YYYY-MM-DDThh:mm:ssZ, got ' + LValue);
+    Assert.IsTrue(TryParseUtcTimestamp(LValue, LWritten), 'timestamp must parse');
+    LNowUtc := TTimeZone.Local.ToUniversalTime(Now);
+    Assert.IsTrue(Abs(MinutesBetween(LNowUtc, LWritten)) <= 5,
+      'timestamp must be the current UTC time, got ' + LValue);
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.FormatUtcTimestamp_ConvertsOffsets;
+begin
+  Assert.AreEqual('2026-05-18T04:27:39Z', FormatUtcTimestamp('2026-05-18T14:27:39.895+10:00'));
+  Assert.AreEqual('2025-12-31T15:30:00Z', FormatUtcTimestamp('2026-01-01T01:30:00+10:00'));
+  Assert.AreEqual('2026-02-24T15:00:00Z', FormatUtcTimestamp('2026-02-24T10:00:00-05:00'));
+  Assert.AreEqual('2026-02-24T10:00:00Z', FormatUtcTimestamp('2026-02-24T10:00:00.895Z'));
+  Assert.AreEqual('2026-01-01T00:00:00Z', FormatUtcTimestamp('2026-01-01T00:00:00'));
 end;
 
 procedure TCycloneDxWriterTests.Write_MetadataContainsToolInfo;
@@ -390,7 +566,7 @@ var
 begin
   SetLength(FMetadata.Properties, 2);
   FMetadata.Properties[0] := TSbomProperty.Create(
-    'net.developer-experts.dx-comply:document.profile', 'cra-compliance-assessment');
+    'net.developer-experts.dx-comply:document.profile', 'build-evidence');
   FMetadata.Properties[1] := TSbomProperty.Create(
     'net.developer-experts.dx-comply:assessment.warning-count', '0');
   SetLength(FMetadata.ComponentProperties, 1);
@@ -413,7 +589,7 @@ begin
       'metadata.component.properties must be present when component properties are provided');
     Assert.AreEqual('net.developer-experts.dx-comply:document.profile',
       (LBomProperties.Items[0] as TJSONObject).GetValue<string>('name'));
-    Assert.AreEqual('cra-compliance-assessment',
+    Assert.AreEqual('build-evidence',
       (LBomProperties.Items[0] as TJSONObject).GetValue<string>('value'));
     Assert.AreEqual('net.developer-experts.dx-comply:assessment.warning-count',
       (LBomProperties.Items[1] as TJSONObject).GetValue<string>('name'));
@@ -424,7 +600,7 @@ begin
   end;
 end;
 
-// ---- Write — dependencies ---------------------------------------------------
+// ---- Write: dependencies ---------------------------------------------------
 
 procedure TCycloneDxWriterTests.Write_DependenciesSection_Exists;
 var
@@ -442,7 +618,310 @@ begin
   end;
 end;
 
-// ---- Write — JSON validity --------------------------------------------------
+procedure TCycloneDxWriterTests.Write_Dependencies_GroupedWhenPackagesAndExternalRefsPresent;
+var
+  LJson: TJSONObject;
+  LDeps: TJSONArray;
+  LDependsOn: TJSONArray;
+  LDep: TJSONObject;
+  I: Integer;
+  LParents: Integer;
+  LProjectDepends: TJSONArray;
+  LTargetDepends: TJSONArray;
+
+  function DependsOnContains(const ADepends: TJSONArray; const ARef: string): Boolean;
+  var
+    J: Integer;
+  begin
+    Result := False;
+    if not Assigned(ADepends) then
+      Exit;
+    for J := 0 to ADepends.Count - 1 do
+      if ADepends.Items[J].Value = ARef then
+        Exit(True);
+  end;
+
+begin
+  FArtefacts.Add(MakeArtefact('TestApp.exe', 'application', '', 1024));
+  FArtefacts.Add(MakeArtefact('rtl.bpl', 'runtime-package', '', -1));
+  FArtefacts.Add(MakeArtefact('vendor.dll', 'external-reference', '', -1));
+  FArtefacts.Add(MakeArtefact('System.dcu', 'unit-evidence', '', 100));
+
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo),
+    'Write must succeed');
+
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LDeps := LJson.GetValue('dependencies') as TJSONArray;
+    Assert.IsNotNull(LDeps, 'dependencies array must be present');
+
+    LParents := 0;
+    LProjectDepends := nil;
+    LTargetDepends := nil;
+    for I := 0 to LDeps.Count - 1 do
+    begin
+      LDep := LDeps.Items[I] as TJSONObject;
+      LDependsOn := LDep.GetValue('dependsOn') as TJSONArray;
+      if Assigned(LDependsOn) and (LDependsOn.Count > 0) then
+        Inc(LParents);
+      if LDep.GetValue<string>('ref') = FProjectInfo.ProjectName then
+        LProjectDepends := LDependsOn
+      else if LDep.GetValue<string>('ref') = 'comp-0' then
+        LTargetDepends := LDependsOn;
+    end;
+
+    Assert.IsTrue(LParents >= 2,
+      'runtime packages and external refs must produce at least two dependsOn parents');
+    Assert.IsNotNull(LProjectDepends, 'project dependency entry must exist');
+    Assert.AreEqual(NativeInt(1), NativeInt(LProjectDepends.Count),
+      'the project must depend only on the deliverable');
+    Assert.AreEqual('comp-0', LProjectDepends.Items[0].Value,
+      'the project must depend on the application');
+    Assert.IsNotNull(LTargetDepends, 'application dependency entry must exist');
+    Assert.IsTrue(DependsOnContains(LTargetDepends, 'comp-1'),
+      'the application must depend on the runtime package');
+    Assert.IsTrue(DependsOnContains(LTargetDepends, 'comp-2'),
+      'the application must depend on the external DLL');
+    Assert.IsTrue(DependsOnContains(LTargetDepends, 'comp-3'),
+      'the application must depend on the linked unit');
+    Assert.IsFalse(DependsOnContains(LProjectDepends, 'comp-1'),
+      'the project must not depend directly on the runtime package');
+    Assert.IsFalse(DependsOnContains(LProjectDepends, 'comp-2'),
+      'the project must not depend directly on the external DLL');
+    Assert.AreEqual('comp-1', LTargetDepends.Items[0].Value,
+      'runtime packages must be grouped before external DLLs');
+    Assert.AreEqual('comp-2', LTargetDepends.Items[1].Value,
+      'external DLLs must be grouped before linked units');
+    Assert.AreEqual('comp-3', LTargetDepends.Items[2].Value,
+      'linked units must follow external DLLs');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_Dependencies_PackageTargetPreferredOverRuntimePackage;
+var
+  LJson: TJSONObject;
+  LDeps: TJSONArray;
+  LDep: TJSONObject;
+  LProjectDepends: TJSONArray;
+  LTargetDepends: TJSONArray;
+  I: Integer;
+begin
+  FArtefacts.Add(MakeArtefact('rtl.bpl', 'runtime-package', '', -1));
+  FArtefacts.Add(MakeArtefact('TestApp.bpl', 'package', '', 2048));
+  FArtefacts.Add(MakeArtefact('helper.dll', 'library', '', 512));
+
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LDeps := LJson.GetValue('dependencies') as TJSONArray;
+    LProjectDepends := nil;
+    LTargetDepends := nil;
+    for I := 0 to LDeps.Count - 1 do
+    begin
+      LDep := LDeps.Items[I] as TJSONObject;
+      if LDep.GetValue<string>('ref') = FProjectInfo.ProjectName then
+        LProjectDepends := LDep.GetValue('dependsOn') as TJSONArray
+      else if LDep.GetValue<string>('ref') = 'comp-1' then
+        LTargetDepends := LDep.GetValue('dependsOn') as TJSONArray;
+    end;
+
+    Assert.IsNotNull(LProjectDepends);
+    Assert.AreEqual('comp-1', LProjectDepends.Items[0].Value,
+      'the package whose name matches the project must be the deliverable');
+    Assert.IsNotNull(LTargetDepends);
+    Assert.AreEqual('comp-0', LTargetDepends.Items[0].Value,
+      'the runtime package must depend from the deliverable, not be the deliverable');
+    Assert.AreEqual('comp-2', LTargetDepends.Items[1].Value,
+      'a copied DLL must depend from the deliverable');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_Dependencies_WithoutDeliverable_ProjectDependsOnAll;
+var
+  LJson: TJSONObject;
+  LDeps: TJSONArray;
+  LDependsOn: TJSONArray;
+begin
+  FArtefacts.Add(MakeArtefact('System.dcu', 'unit-evidence', '', 100));
+  FArtefacts.Add(MakeArtefact('rtl.bpl', 'runtime-package', '', -1));
+
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LDeps := LJson.GetValue('dependencies') as TJSONArray;
+    Assert.AreEqual(NativeInt(1), NativeInt(LDeps.Count),
+      'without a deliverable there is a single dependency entry');
+    LDependsOn := (LDeps.Items[0] as TJSONObject).GetValue('dependsOn') as TJSONArray;
+    Assert.AreEqual(NativeInt(2), NativeInt(LDependsOn.Count),
+      'the project must still reference every component');
+  finally
+    LJson.Free;
+  end;
+end;
+
+function FindPropertyValue(const AComponent: TJSONObject; const AName: string;
+  out AValue: string): Boolean;
+var
+  LProperties: TJSONArray;
+  I: Integer;
+begin
+  Result := False;
+  AValue := '';
+  LProperties := AComponent.GetValue('properties') as TJSONArray;
+  if not Assigned(LProperties) then
+    Exit;
+  for I := 0 to LProperties.Count - 1 do
+    if (LProperties.Items[I] as TJSONObject).GetValue<string>('name') = AName then
+    begin
+      AValue := (LProperties.Items[I] as TJSONObject).GetValue<string>('value');
+      Exit(True);
+    end;
+end;
+
+procedure TCycloneDxWriterTests.Write_ExternalDll_InOutputDir_HasSizeHashesAndLocationSource;
+var
+  LArtefact: TArtefactInfo;
+  LJson, LComponent: TJSONObject;
+  LHashes: TJSONArray;
+  LValue: string;
+begin
+  LArtefact := MakeArtefact('vendor.dll', 'external-reference',
+    StringOfChar('a', 64), 4096);
+  LArtefact.HashSha512 := StringOfChar('b', 128);
+  LArtefact.Evidence := 'DLL';
+  LArtefact.Confidence := 'Source-scan';
+  LArtefact.LocationSource := 'output-directory';
+  FArtefacts.Add(LArtefact);
+
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LComponent := (LJson.GetValue('components') as TJSONArray).Items[0] as TJSONObject;
+    LHashes := LComponent.GetValue('hashes') as TJSONArray;
+    Assert.IsNotNull(LHashes, 'a DLL in the output directory must be hashed');
+    Assert.AreEqual(NativeInt(2), NativeInt(LHashes.Count));
+    Assert.IsTrue(FindPropertyValue(LComponent, 'file:size', LValue));
+    Assert.AreEqual('4096', LValue);
+    Assert.IsTrue(FindPropertyValue(LComponent,
+      'net.developer-experts.dx-comply:locationSource', LValue));
+    Assert.AreEqual('output-directory', LValue);
+    Assert.IsFalse(FindPropertyValue(LComponent,
+      'net.developer-experts.dx-comply:location', LValue),
+      'the build machine path must not be written for a shipped DLL');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_ExternalDll_SystemDir_HasLocationButNoHash;
+var
+  LArtefact: TArtefactInfo;
+  LJson, LComponent: TJSONObject;
+  LValue: string;
+begin
+  LArtefact := MakeArtefact('ws2_32.dll', 'external-reference', '', -1);
+  LArtefact.FilePath := '';
+  LArtefact.Evidence := 'DLL';
+  LArtefact.Confidence := 'Source-scan';
+  LArtefact.LocationSource := 'system-directory';
+  LArtefact.Location := 'C:\Windows\SysWOW64\ws2_32.dll';
+  FArtefacts.Add(LArtefact);
+
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LComponent := (LJson.GetValue('components') as TJSONArray).Items[0] as TJSONObject;
+    Assert.IsNull(LComponent.GetValue('hashes'),
+      'a DLL found only in a system directory must not be hashed');
+    Assert.IsFalse(FindPropertyValue(LComponent, 'file:size', LValue));
+    Assert.IsTrue(FindPropertyValue(LComponent,
+      'net.developer-experts.dx-comply:locationSource', LValue));
+    Assert.AreEqual('system-directory', LValue);
+    Assert.IsTrue(FindPropertyValue(LComponent,
+      'net.developer-experts.dx-comply:location', LValue));
+    Assert.AreEqual('C:\Windows\SysWOW64\ws2_32.dll', LValue);
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_ExternalDll_MissingFile_KeepsEvidenceAndConditional;
+var
+  LArtefact: TArtefactInfo;
+  LJson: TJSONObject;
+  LComponent: TJSONObject;
+  LProperties: TJSONArray;
+  LProp: TJSONObject;
+  I: Integer;
+  LHasEvidence: Boolean;
+  LHasConfidence: Boolean;
+  LHasConditional: Boolean;
+  LHasSize: Boolean;
+begin
+  LArtefact := MakeArtefact('uastack_64.dll', 'external-reference', '', -1);
+  LArtefact.Evidence := 'DLL';
+  LArtefact.Confidence := 'Source-scan';
+  LArtefact.Conditional := True;
+  FArtefacts.Add(LArtefact);
+
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LComponent := (LJson.GetValue('components') as TJSONArray).Items[0] as TJSONObject;
+    Assert.AreEqual('uastack_64.dll', LComponent.GetValue<string>('name'));
+    Assert.IsNull(LComponent.GetValue('hashes'),
+      'an absent DLL must not carry an empty hash');
+    LProperties := LComponent.GetValue('properties') as TJSONArray;
+    Assert.IsNotNull(LProperties);
+
+    LHasEvidence := False;
+    LHasConfidence := False;
+    LHasConditional := False;
+    LHasSize := False;
+    for I := 0 to LProperties.Count - 1 do
+    begin
+      LProp := LProperties.Items[I] as TJSONObject;
+      if LProp.GetValue<string>('name') = 'net.developer-experts.dx-comply:evidence' then
+      begin
+        LHasEvidence := True;
+        Assert.AreEqual('DLL', LProp.GetValue<string>('value'));
+      end;
+      if LProp.GetValue<string>('name') = 'net.developer-experts.dx-comply:confidence' then
+      begin
+        LHasConfidence := True;
+        Assert.AreEqual('Source-scan', LProp.GetValue<string>('value'));
+      end;
+      if LProp.GetValue<string>('name') = 'net.developer-experts.dx-comply:conditional' then
+      begin
+        LHasConditional := True;
+        Assert.AreEqual('true', LProp.GetValue<string>('value'));
+      end;
+      if LProp.GetValue<string>('name') = 'file:size' then
+        LHasSize := True;
+    end;
+
+    Assert.IsTrue(LHasEvidence, 'JSON must keep the evidence property');
+    Assert.IsTrue(LHasConfidence, 'JSON must keep the confidence property');
+    Assert.IsTrue(LHasConditional, 'JSON must mark the DLL name as conditional');
+    Assert.IsFalse(LHasSize, 'an absent file must not invent a size');
+  finally
+    LJson.Free;
+  end;
+end;
+
+// ---- Write: JSON validity --------------------------------------------------
 
 procedure TCycloneDxWriterTests.Write_OutputIsValidJson;
 var
@@ -459,7 +938,7 @@ begin
   end;
 end;
 
-// ---- Write — uniqueness -----------------------------------------------------
+// ---- Write: uniqueness -----------------------------------------------------
 
 procedure TCycloneDxWriterTests.Write_SerialNumber_UniquePerCall;
 var
@@ -498,7 +977,7 @@ end;
 procedure TCycloneDxWriterTests.Validate_ValidCycloneDxJson_ReturnsTrue;
 const
   cValidJson =
-    '{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:test",' +
+    '{"bomFormat":"CycloneDX","specVersion":"1.6","serialNumber":"urn:uuid:test",' +
     '"version":1,"metadata":{},"components":[],"dependencies":[]}';
 begin
   Assert.IsTrue(FWriter.Validate(cValidJson),
@@ -513,7 +992,7 @@ end;
 
 procedure TCycloneDxWriterTests.Validate_MissingBomFormat_ReturnsFalse;
 const
-  cJsonNoBomFormat = '{"specVersion":"1.5","serialNumber":"urn:uuid:test"}';
+  cJsonNoBomFormat = '{"specVersion":"1.6","serialNumber":"urn:uuid:test"}';
 begin
   Assert.IsFalse(FWriter.Validate(cJsonNoBomFormat),
     'Validate must return False when bomFormat is absent');
@@ -582,6 +1061,395 @@ begin
     Assert.IsNotNull(LComponent, 'metadata.component must be present');
     Assert.AreEqual('9.9.9-cli', LComponent.GetValue<string>('version'),
       'metadata.component.version must reflect the CLI --version override');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_ToolVersion_ComesFromModule;
+var
+  LComponents: TJSONArray;
+  LJson, LMetadata, LTool, LTools: TJSONObject;
+begin
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LMetadata := LJson.GetValue('metadata') as TJSONObject;
+    LTools := LMetadata.GetValue('tools') as TJSONObject;
+    LComponents := LTools.GetValue('components') as TJSONArray;
+    LTool := LComponents.Items[0] as TJSONObject;
+    Assert.AreEqual(GetDxComplyToolVersion, LTool.GetValue<string>('version'),
+      'tools.components[0].version must be the running module version');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_ToolVersion_UsesMetadataOverride;
+var
+  LComponents: TJSONArray;
+  LJson, LMetadata, LTool, LTools: TJSONObject;
+begin
+  FMetadata.ToolVersion := '9.9.9-meta';
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LMetadata := LJson.GetValue('metadata') as TJSONObject;
+    LTools := LMetadata.GetValue('tools') as TJSONObject;
+    LComponents := LTools.GetValue('components') as TJSONArray;
+    LTool := LComponents.Items[0] as TJSONObject;
+    Assert.AreEqual('9.9.9-meta', LTool.GetValue<string>('version'),
+      'An explicit metadata tool version must be written unchanged');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_ProductLicence_OnBuiltProgramOnly;
+var
+  LJson, LComponent: TJSONObject;
+  LComponents: TJSONArray;
+begin
+  FMetadata.Licence := 'LicenseRef-Proprietary';
+  FArtefacts.Add(MakeArtefact('TestApp.exe', 'application', 'abcd1234ef', 1024));
+  FArtefacts.Add(MakeArtefact('vendor.dll', 'library', 'abcd1234ef', 1024));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LComponents := LJson.GetValue('components') as TJSONArray;
+    Assert.IsNotNull(LComponents, 'components must be present');
+    LComponent := LComponents.Items[0] as TJSONObject;
+    Assert.AreEqual('TestApp.exe', LComponent.GetValue<string>('name'));
+    Assert.IsNotNull(LComponent.GetValue('licenses'),
+      'The built program must carry the product licence');
+    Assert.IsTrue(Pos('LicenseRef-Proprietary', LComponent.ToJSON) > 0);
+    LComponent := LComponents.Items[1] as TJSONObject;
+    Assert.IsNull(LComponent.GetValue('licenses'),
+      'Other files must not get the product licence');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_ProductLicence_OnUntypedProjectExe;
+var
+  LJson, LDep, LComponent: TJSONObject;
+  LComponents, LDeps, LDependsOn: TJSONArray;
+  I, LLicensed: Integer;
+  LName: string;
+begin
+  FProjectInfo.ProjectName := 'OtherApp';
+  FProjectInfo.OutputFilePath := TPath.Combine(TPath.GetTempPath, 'XmlConvert.exe');
+  FMetadata.Licence := 'LicenseRef-Proprietary';
+  FArtefacts.Add(MakeArtefact('XmlConvert.exe', 'file', 'abcd1234ef', 1024));
+  FArtefacts.Add(MakeArtefact('setup\XmlConvert.exe', 'file', 'abcd1234ef', 2048));
+  FArtefacts.Add(MakeArtefact('OtherApp.exe', 'application', 'abcd1234ef', 512));
+  FArtefacts.Add(MakeArtefact('bit.dll', 'library', 'abcd1234ef', 256));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LComponents := LJson.GetValue('components') as TJSONArray;
+    Assert.IsNotNull(LComponents, 'components must be present');
+    Assert.AreEqual(NativeInt(4), NativeInt(LComponents.Count),
+      'The project executable stays in the SBOM');
+    LLicensed := 0;
+    for I := 0 to LComponents.Count - 1 do
+    begin
+      LComponent := LComponents.Items[I] as TJSONObject;
+      LName := LComponent.GetValue<string>('name');
+      if Pos('XmlConvert.exe', LName) > 0 then
+      begin
+        Assert.IsNotNull(LComponent.GetValue('licenses'),
+          'The project executable must carry the product licence');
+        Assert.IsTrue(Pos('LicenseRef-Proprietary', LComponent.ToJSON) > 0);
+        Inc(LLicensed);
+      end
+      else
+        Assert.IsNull(LComponent.GetValue('licenses'),
+          'A neighboring binary must not get the product licence');
+    end;
+    Assert.AreEqual(2, LLicensed, 'Both copies of the project executable are licensed');
+
+    LDeps := LJson.GetValue('dependencies') as TJSONArray;
+    Assert.IsNotNull(LDeps, 'dependencies array must be present');
+    LDependsOn := nil;
+    for I := 0 to LDeps.Count - 1 do
+    begin
+      LDep := LDeps.Items[I] as TJSONObject;
+      if LDep.GetValue<string>('ref') = 'OtherApp' then
+        LDependsOn := LDep.GetValue('dependsOn') as TJSONArray;
+    end;
+    Assert.IsNotNull(LDependsOn, 'the project dependency entry must exist');
+    Assert.AreEqual(NativeInt(1), NativeInt(LDependsOn.Count),
+      'the project must depend only on the deliverable');
+    Assert.AreEqual('comp-0', LDependsOn.Items[0].Value,
+      'the project must depend on the output file, not a neighboring exe');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_RootLicence_OnMetadataComponent;
+var
+  LJson, LMetadata, LComponent, LLicense: TJSONObject;
+  LLicences: TJSONArray;
+begin
+  FMetadata.ProductName := 'TestApp';
+  FMetadata.Licence := 'MIT';
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LMetadata := LJson.GetValue('metadata') as TJSONObject;
+    Assert.IsNotNull(LMetadata, 'metadata must be present');
+    LComponent := LMetadata.GetValue('component') as TJSONObject;
+    Assert.IsNotNull(LComponent, 'metadata.component must be present');
+    Assert.AreEqual('TestApp', LComponent.GetValue<string>('name'));
+    LLicences := LComponent.GetValue('licenses') as TJSONArray;
+    Assert.IsNotNull(LLicences, 'metadata.component.licenses must be present');
+    Assert.AreEqual(2, Integer(LLicences.Count));
+    LLicense := (LLicences.Items[0] as TJSONObject).GetValue('license') as TJSONObject;
+    Assert.AreEqual('MIT', LLicense.GetValue<string>('id'));
+    Assert.AreEqual('concluded', LLicense.GetValue<string>('acknowledgement'));
+    LLicense := (LLicences.Items[1] as TJSONObject).GetValue('license') as TJSONObject;
+    Assert.AreEqual('MIT', LLicense.GetValue<string>('id'));
+    Assert.AreEqual('declared', LLicense.GetValue<string>('acknowledgement'));
+  finally
+    LJson.Free;
+  end;
+
+  FMetadata.Licence := '';
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LComponent := (LJson.GetValue('metadata') as TJSONObject).GetValue('component') as TJSONObject;
+    Assert.IsNull(LComponent.GetValue('licenses'),
+      'An empty licence writes no licenses element');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_UnitLicences_EmbarcaderoAndOwnCode;
+var
+  LJson, LComponent: TJSONObject;
+  LComponents: TJSONArray;
+  LUnit: TArtefactInfo;
+
+  function ComponentNamed(const AName: string): TJSONObject;
+  var
+    I: Integer;
+  begin
+    Result := nil;
+    for I := 0 to LComponents.Count - 1 do
+      if SameText(TJSONObject(LComponents.Items[I]).GetValue<string>('name'), AName) then
+        Exit(TJSONObject(LComponents.Items[I]));
+  end;
+
+  function LicenceText(AComponent: TJSONObject): string;
+  var
+    LLicences: TJSONArray;
+    LChoice, LLicence: TJSONObject;
+  begin
+    Result := '';
+    if not (AComponent.GetValue('licenses') is TJSONArray) then
+      Exit;
+    LLicences := TJSONArray(AComponent.GetValue('licenses'));
+    if LLicences.Count = 0 then
+      Exit;
+    LChoice := LLicences.Items[0] as TJSONObject;
+    if LChoice.GetValue('expression') <> nil then
+      Exit(LChoice.GetValue<string>('expression'));
+    LLicence := LChoice.GetValue('license') as TJSONObject;
+    if LLicence = nil then
+      Exit;
+    if LLicence.GetValue('id') <> nil then
+      Exit(LLicence.GetValue<string>('id'));
+    if LLicence.GetValue('name') <> nil then
+      Result := LLicence.GetValue<string>('name');
+  end;
+
+  procedure AddUnit(const AName, AOrigin, ASource: string);
+  begin
+    LUnit := MakeArtefact(AName, 'unit-evidence', 'abcd1234ef', 32);
+    LUnit.Origin := AOrigin;
+    LUnit.SourcePath := ASource;
+    FArtefacts.Add(LUnit);
+  end;
+
+begin
+  FMetadata.Licence := 'MIT';
+  FMetadata.ComponentManifestJson :=
+    '{"components":[{"name":"Wrapped","version":"1","vendor":"A","licence":"Apache-2.0",' +
+    '"type":"library","units_exact":["Data.DB"]}],' +
+    '"own_code_units":["MainForm"],"own_code_prefixes":["App"],' +
+    '"own_code_folders":["' +
+    StringReplace('C:\DXComplyFolderTest\src', '\', '\\', [rfReplaceAll]) + '"]}';
+  FArtefacts.Add(MakeArtefact('TestApp.exe', 'application', 'abcd1234ef', 1024));
+  AddUnit('System.SysUtils.pas', 'Embarcadero RTL', '');
+  AddUnit('Vcl.Forms.pas', 'Embarcadero VCL', '');
+  AddUnit('FMX.Forms.pas', 'Embarcadero FMX', '');
+  AddUnit('MainForm.pas', 'Local project', '');
+  AddUnit('AppSettings.pas', 'Local project', '');
+  AddUnit('Helper.pas', 'Local project', 'C:\DXComplyFolderTest\src\Helper.pas');
+  AddUnit('LocalOnly.pas', 'Local project', '');
+  AddUnit('Data.DB.pas', 'Embarcadero RTL', '');
+  FArtefacts.Add(MakeArtefact('vendor.dll', 'library', 'abcd1234ef', 64));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  Assert.IsTrue(FWriter.Validate(TFile.ReadAllText(FOutputFile, TEncoding.UTF8)));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LComponents := LJson.GetValue('components') as TJSONArray;
+    Assert.AreEqual('MIT', LicenceText(ComponentNamed('TestApp.exe')));
+    LComponent := ComponentNamed('System.SysUtils.pas');
+    Assert.AreEqual('Embarcadero RTL', LicenceText(LComponent));
+    Assert.IsTrue(Pos('"hashes"', LComponent.ToJSON) < Pos('"licenses"', LComponent.ToJSON),
+      'The unit licence follows the hashes');
+    Assert.AreEqual('Embarcadero VCL', LicenceText(ComponentNamed('Vcl.Forms.pas')));
+    Assert.AreEqual('Embarcadero FMX', LicenceText(ComponentNamed('FMX.Forms.pas')));
+    Assert.AreEqual('MIT', LicenceText(ComponentNamed('MainForm.pas')));
+    Assert.AreEqual('MIT', LicenceText(ComponentNamed('AppSettings.pas')));
+    Assert.AreEqual('MIT', LicenceText(ComponentNamed('Helper.pas')));
+    Assert.IsNull(ComponentNamed('LocalOnly.pas').GetValue('licenses'));
+    Assert.IsNull(ComponentNamed('vendor.dll').GetValue('licenses'));
+    Assert.IsNull(ComponentNamed('Data.DB.pas').GetValue('licenses'),
+      'A unit matched to a manifest library does not also take the origin label');
+    Assert.AreEqual('Apache-2.0', LicenceText(ComponentNamed('Wrapped')));
+  finally
+    LJson.Free;
+  end;
+
+  FMetadata.Licence := '';
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LComponents := LJson.GetValue('components') as TJSONArray;
+    Assert.IsNull(ComponentNamed('TestApp.exe').GetValue('licenses'));
+    Assert.IsNull(ComponentNamed('MainForm.pas').GetValue('licenses'),
+      'Own code stays without a licence when the product licence is empty');
+    Assert.AreEqual('Embarcadero RTL', LicenceText(ComponentNamed('System.SysUtils.pas')));
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TCycloneDxWriterTests.Write_DeliverableWithoutVersion_UsesProductVersion;
+var
+  LJson: TJSONObject;
+  LSo, LDll: TArtefactInfo;
+
+  function ComponentNamed(const AJson: TJSONObject; const AName: string): TJSONObject;
+  var
+    LComponents: TJSONArray;
+    I: Integer;
+  begin
+    Result := nil;
+    LComponents := AJson.GetValue('components') as TJSONArray;
+    Assert.IsNotNull(LComponents, 'components must be present');
+    for I := 0 to LComponents.Count - 1 do
+      if (LComponents.Items[I] as TJSONObject).GetValue<string>('name') = AName then
+        Exit(LComponents.Items[I] as TJSONObject);
+    Assert.Fail(AName + ' must be a component');
+  end;
+
+  function HasVersionSource(const AComponent: TJSONObject): Boolean;
+  var
+    LProps: TJSONArray;
+    I: Integer;
+    LProp: TJSONObject;
+  begin
+    Result := False;
+    if not (AComponent.GetValue('properties') is TJSONArray) then
+      Exit;
+    LProps := AComponent.GetValue('properties') as TJSONArray;
+    for I := 0 to LProps.Count - 1 do
+    begin
+      LProp := LProps.Items[I] as TJSONObject;
+      if LProp.GetValue<string>('name') = cVersionSourceProperty then
+        Exit(True);
+    end;
+  end;
+
+begin
+  FProjectInfo.ProjectName := 'WernigApp';
+  FMetadata.ProductVersion := '16.0.0.7';
+  FArtefacts.Add(MakeArtefact('libWernigApp.so', 'file', 'abcd1234ef', 1024));
+  LDll := MakeArtefact('vendor.dll', 'library', 'abcd1234ef', 2048);
+  LDll.Version := '9.9.9';
+  FArtefacts.Add(LDll);
+  FArtefacts.Add(MakeArtefact('plugin.dll', 'library', 'abcd1234ef', 512));
+
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    Assert.AreEqual('16.0.0.7', ComponentNamed(LJson, 'libWernigApp.so').GetValue<string>('version'),
+      'A shared library with no version resource uses the product version');
+    Assert.IsFalse(HasVersionSource(ComponentNamed(LJson, 'libWernigApp.so')));
+    Assert.AreEqual('9.9.9', ComponentNamed(LJson, 'vendor.dll').GetValue<string>('version'),
+      'A third-party DLL keeps its own version');
+    Assert.IsNull(ComponentNamed(LJson, 'plugin.dll').GetValue('version'),
+      'A third-party file with no version stays without one');
+  finally
+    LJson.Free;
+  end;
+
+  FArtefacts.Clear;
+  LSo := MakeArtefact('libWernigApp.so', 'file', 'abcd1234ef', 1024);
+  LSo.Version := '2026-01-01T00:00:00Z';
+  LSo.VersionFromFileDate := True;
+  FArtefacts.Add(LSo);
+  LDll := MakeArtefact('vendor.dll', 'library', 'abcd1234ef', 2048);
+  LDll.Version := '2026-01-02T00:00:00Z';
+  LDll.VersionFromFileDate := True;
+  FArtefacts.Add(LDll);
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    Assert.AreEqual('16.0.0.7', ComponentNamed(LJson, 'libWernigApp.so').GetValue<string>('version'),
+      'A file-date stand-in on the built program is replaced by the product version');
+    Assert.IsFalse(HasVersionSource(ComponentNamed(LJson, 'libWernigApp.so')),
+      'The product version is not marked as a file date');
+    Assert.AreEqual('2026-01-02T00:00:00Z',
+      ComponentNamed(LJson, 'vendor.dll').GetValue<string>('version'));
+    Assert.IsTrue(HasVersionSource(ComponentNamed(LJson, 'vendor.dll')),
+      'A third-party file keeps its file-date version');
+  finally
+    LJson.Free;
+  end;
+
+  FArtefacts.Clear;
+  LSo := MakeArtefact('libWernigApp.so', 'file', 'abcd1234ef', 1024);
+  LSo.Version := '3.2.1';
+  FArtefacts.Add(LSo);
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    Assert.AreEqual('3.2.1', ComponentNamed(LJson, 'libWernigApp.so').GetValue<string>('version'),
+      'A version already on the built program is kept');
+  finally
+    LJson.Free;
+  end;
+
+  FArtefacts.Clear;
+  FMetadata.ProductVersion := '';
+  FProjectInfo.Version := '4.5.6';
+  FArtefacts.Add(MakeArtefact('libWernigApp.so', 'file', 'abcd1234ef', 1024));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    Assert.AreEqual('4.5.6', ComponentNamed(LJson, 'libWernigApp.so').GetValue<string>('version'),
+      'An empty header version falls back to the project version, as the report header does');
   finally
     LJson.Free;
   end;

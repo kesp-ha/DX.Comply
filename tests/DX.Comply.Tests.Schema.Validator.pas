@@ -65,6 +65,18 @@ type
     [Test]
     procedure CycloneDxJson_EmptyString_ReportsError;
 
+    [Test]
+    procedure CycloneDxJson_SpecVersion15_ReportsError;
+
+    [Test]
+    procedure CycloneDxJson_SpecVersion17_PassesValidation;
+
+    [Test]
+    procedure CycloneDxXml_Namespace15_ReportsError;
+
+    [Test]
+    procedure IsCycloneDxSpecVersionAccepted_Boundaries;
+
     // CycloneDX XML
     [Test]
     procedure CycloneDxXml_ValidDocument_PassesValidation;
@@ -77,6 +89,15 @@ type
 
     [Test]
     procedure CycloneDxXml_EmptyString_ReportsError;
+
+    [Test]
+    procedure CycloneDxXml_PropertiesBeforeTools_ReportsError;
+
+    [Test]
+    procedure CycloneDxXml_PurlBeforeHashes_ReportsError;
+
+    [Test]
+    procedure CycloneDxXml_SchemaOrder_PassesValidation;
 
     // SPDX JSON
     [Test]
@@ -127,7 +148,7 @@ begin
   Result :=
     '{' +
     '  "bomFormat": "CycloneDX",' +
-    '  "specVersion": "1.5",' +
+    '  "specVersion": "1.6",' +
     '  "serialNumber": "urn:uuid:12345678-1234-1234-1234-123456789012",' +
     '  "version": 1,' +
     '  "metadata": {' +
@@ -163,7 +184,7 @@ function TSchemaValidatorTests.MakeValidCycloneDxXml: string;
 begin
   Result :=
     '<?xml version="1.0" encoding="UTF-8"?>' +
-    '<bom xmlns="http://cyclonedx.org/schema/bom/1.5" version="1" ' +
+    '<bom xmlns="http://cyclonedx.org/schema/bom/1.6" version="1" ' +
     'serialNumber="urn:uuid:12345678-1234-1234-1234-123456789012">' +
     '  <metadata>' +
     '    <timestamp>2026-02-24T10:00:00+01:00</timestamp>' +
@@ -221,7 +242,7 @@ procedure TSchemaValidatorTests.CycloneDxJson_MissingBomFormat_ReportsError;
 var
   LResult: TValidationResult;
 begin
-  LResult := FValidator.ValidateCycloneDxJson('{"specVersion": "1.5", "version": 1, "metadata": {}, "components": []}');
+  LResult := FValidator.ValidateCycloneDxJson('{"specVersion": "1.6", "version": 1, "metadata": {}, "components": []}');
   Assert.IsFalse(LResult.IsValid);
   Assert.IsTrue(Length(LResult.Errors) > 0);
 end;
@@ -230,7 +251,7 @@ procedure TSchemaValidatorTests.CycloneDxJson_WrongBomFormat_ReportsError;
 var
   LResult: TValidationResult;
 begin
-  LResult := FValidator.ValidateCycloneDxJson('{"bomFormat": "SPDX", "specVersion": "1.5", "version": 1, "metadata": {}, "components": []}');
+  LResult := FValidator.ValidateCycloneDxJson('{"bomFormat": "SPDX", "specVersion": "1.6", "version": 1, "metadata": {}, "components": []}');
   Assert.IsFalse(LResult.IsValid);
 end;
 
@@ -238,7 +259,7 @@ procedure TSchemaValidatorTests.CycloneDxJson_MissingComponents_ReportsError;
 var
   LResult: TValidationResult;
 begin
-  LResult := FValidator.ValidateCycloneDxJson('{"bomFormat": "CycloneDX", "specVersion": "1.5", "version": 1, "metadata": {}}');
+  LResult := FValidator.ValidateCycloneDxJson('{"bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1, "metadata": {}}');
   Assert.IsFalse(LResult.IsValid);
 end;
 
@@ -250,7 +271,7 @@ begin
   LJson :=
     '{' +
     '  "bomFormat": "CycloneDX",' +
-    '  "specVersion": "1.5",' +
+    '  "specVersion": "1.6",' +
     '  "version": 1,' +
     '  "metadata": {"timestamp": "2026-01-01T00:00:00Z"},' +
     '  "components": [' +
@@ -275,7 +296,7 @@ begin
   LJson :=
     '{' +
     '  "bomFormat": "CycloneDX",' +
-    '  "specVersion": "1.5",' +
+    '  "specVersion": "1.6",' +
     '  "version": 1,' +
     '  "metadata": {"timestamp": "2026-01-01T00:00:00Z"},' +
     '  "components": [' +
@@ -317,7 +338,7 @@ procedure TSchemaValidatorTests.CycloneDxXml_MissingMetadata_ReportsError;
 var
   LResult: TValidationResult;
 begin
-  LResult := FValidator.ValidateCycloneDxXml('<?xml version="1.0"?><bom xmlns="http://cyclonedx.org/schema/bom/1.5"><components></components></bom>');
+  LResult := FValidator.ValidateCycloneDxXml('<?xml version="1.0"?><bom xmlns="http://cyclonedx.org/schema/bom/1.6"><components></components></bom>');
   Assert.IsFalse(LResult.IsValid);
 end;
 
@@ -327,6 +348,91 @@ var
 begin
   LResult := FValidator.ValidateCycloneDxXml('');
   Assert.IsFalse(LResult.IsValid);
+end;
+
+procedure TSchemaValidatorTests.CycloneDxXml_PropertiesBeforeTools_ReportsError;
+const
+  cXml =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<bom xmlns="http://cyclonedx.org/schema/bom/1.6" version="1" ' +
+    'serialNumber="urn:uuid:12345678-1234-1234-1234-123456789012">' +
+    '<metadata>' +
+    '<timestamp>2026-02-24T10:00:00+01:00</timestamp>' +
+    '<properties><property name="dx:profile">cra</property></properties>' +
+    '<tools><tool><name>DX.Comply</name><version>2.0.0.0</version></tool></tools>' +
+    '</metadata>' +
+    '<components></components>' +
+    '</bom>';
+var
+  LResult: TValidationResult;
+  LError: string;
+  LFound: Boolean;
+begin
+  LResult := FValidator.ValidateCycloneDxXml(cXml);
+  Assert.IsFalse(LResult.IsValid, 'properties before tools must fail validation');
+  LFound := False;
+  for LError in LResult.Errors do
+    if Pos('sequence order', LError) > 0 then
+      LFound := True;
+  Assert.IsTrue(LFound, 'The error list must mention the sequence order');
+end;
+
+procedure TSchemaValidatorTests.CycloneDxXml_PurlBeforeHashes_ReportsError;
+const
+  cXml =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<bom xmlns="http://cyclonedx.org/schema/bom/1.6" version="1" ' +
+    'serialNumber="urn:uuid:12345678-1234-1234-1234-123456789012">' +
+    '<metadata><timestamp>2026-02-24T10:00:00+01:00</timestamp></metadata>' +
+    '<components><component type="file" bom-ref="comp-0">' +
+    '<name>App.exe</name><purl>file:App.exe</purl>' +
+    '<hashes><hash alg="SHA-256">' +
+    'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789' +
+    '</hash></hashes></component></components>' +
+    '</bom>';
+var
+  LResult: TValidationResult;
+begin
+  LResult := FValidator.ValidateCycloneDxXml(cXml);
+  Assert.IsFalse(LResult.IsValid, 'purl before hashes must fail validation');
+end;
+
+procedure TSchemaValidatorTests.CycloneDxXml_SchemaOrder_PassesValidation;
+const
+  cXml =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<bom xmlns="http://cyclonedx.org/schema/bom/1.6" version="1" ' +
+    'serialNumber="urn:uuid:12345678-1234-1234-1234-123456789012">' +
+    '<metadata>' +
+    '<timestamp>2026-02-24T10:00:00+01:00</timestamp>' +
+    '<tools><tool><vendor>Olaf Monien</vendor><name>DX.Comply</name>' +
+    '<version>2.0.0.0</version></tool></tools>' +
+    '<component type="application" bom-ref="App">' +
+    '<supplier><name>Acme</name></supplier>' +
+    '<name>App</name><version>2.0.0.0</version>' +
+    '</component>' +
+    '<properties><property name="dx:profile">cra</property></properties>' +
+    '</metadata>' +
+    '<components><component type="application" bom-ref="comp-0">' +
+    '<name>App.exe</name><version>abcdef012345</version>' +
+    '<hashes><hash alg="SHA-256">' +
+    'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789' +
+    '</hash></hashes>' +
+    '<purl>file:App.exe</purl>' +
+    '<properties><property name="file:size">12</property></properties>' +
+    '</component></components>' +
+    '<dependencies><dependency ref="App">' +
+    '<dependency ref="comp-0"/>' +
+    '</dependency></dependencies>' +
+    '</bom>';
+var
+  LResult: TValidationResult;
+begin
+  LResult := FValidator.ValidateCycloneDxXml(cXml);
+  Assert.IsTrue(LResult.IsValid, 'A document in XSD order must pass. ' +
+    string.Join('; ', LResult.Errors));
+  Assert.AreEqual(NativeInt(0), NativeInt(Length(CycloneDxXmlSequenceErrors(cXml))),
+    'The sequence check must accept XSD order');
 end;
 
 // --- SPDX JSON Tests ---
@@ -406,6 +512,41 @@ var
 begin
   LResult := FValidator.ValidateAuto('{"foo": "bar"}');
   Assert.IsFalse(LResult.IsValid);
+end;
+
+procedure TSchemaValidatorTests.CycloneDxJson_SpecVersion15_ReportsError;
+begin
+  var LJson := MakeValidCycloneDxJson.Replace('"specVersion": "1.6"', '"specVersion": "1.5"');
+  Assert.AreNotEqual(MakeValidCycloneDxJson, LJson, 'Fixture must contain specVersion 1.6');
+  var LResult := FValidator.ValidateCycloneDxJson(LJson);
+  Assert.IsFalse(LResult.IsValid, 'CycloneDX 1.5 is below the TR-03183-2 minimum');
+  Assert.IsTrue(string.Join(' ', LResult.Errors).Contains('1.6'));
+end;
+
+procedure TSchemaValidatorTests.CycloneDxJson_SpecVersion17_PassesValidation;
+begin
+  var LJson := MakeValidCycloneDxJson.Replace('"specVersion": "1.6"', '"specVersion": "1.7"');
+  var LResult := FValidator.ValidateCycloneDxJson(LJson);
+  Assert.IsTrue(LResult.IsValid, string.Join(' ', LResult.Errors));
+end;
+
+procedure TSchemaValidatorTests.CycloneDxXml_Namespace15_ReportsError;
+begin
+  var LXml := MakeValidCycloneDxXml.Replace('cyclonedx.org/schema/bom/1.6', 'cyclonedx.org/schema/bom/1.5');
+  Assert.AreNotEqual(MakeValidCycloneDxXml, LXml, 'Fixture must use the 1.6 namespace');
+  var LResult := FValidator.ValidateCycloneDxXml(LXml);
+  Assert.IsFalse(LResult.IsValid, 'CycloneDX 1.5 XML is below the TR-03183-2 minimum');
+end;
+
+procedure TSchemaValidatorTests.IsCycloneDxSpecVersionAccepted_Boundaries;
+begin
+  Assert.IsTrue(IsCycloneDxSpecVersionAccepted('1.6'));
+  Assert.IsTrue(IsCycloneDxSpecVersionAccepted('1.10'));
+  Assert.IsTrue(IsCycloneDxSpecVersionAccepted('2.0'));
+  Assert.IsFalse(IsCycloneDxSpecVersionAccepted('1.5'));
+  Assert.IsFalse(IsCycloneDxSpecVersionAccepted('1.4'));
+  Assert.IsFalse(IsCycloneDxSpecVersionAccepted(''));
+  Assert.IsFalse(IsCycloneDxSpecVersionAccepted('one.six'));
 end;
 
 end.

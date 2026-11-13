@@ -1,17 +1,18 @@
 ﻿/// <summary>
 /// DX.Comply.CycloneDx.XmlWriter
-/// Generates CycloneDX 1.5 SBOM documents in XML format.
+/// Generates CycloneDX 1.6 SBOM documents in XML format.
 /// </summary>
 ///
 /// <remarks>
-/// This unit provides TCycloneDxXmlWriter which generates CycloneDX 1.5 XML SBOMs:
+/// This unit provides TCycloneDxXmlWriter which generates CycloneDX 1.6 XML SBOMs:
 /// - Full metadata section with tool information
-/// - Component list with hashes (SHA-256)
-/// - Basic dependency graph
+/// - Component list with hashes (SHA-256 and SHA-512 when the file could be opened)
+/// - Dependency graph grouped by deliverable, runtime packages, external DLLs and units no other unit uses
+/// - Direct uses edges between units whose Pascal source was read
 /// - Schema validation support
 ///
-/// The XML output conforms to the CycloneDX 1.5 XSD schema:
-/// https://cyclonedx.org/schema/bom-1.5.xsd
+/// The XML output conforms to the CycloneDX 1.6 XSD schema:
+/// https://cyclonedx.org/schema/bom-1.6.xsd
 ///
 /// Uses lightweight string-based XML generation to avoid MSXML/COM dependencies,
 /// ensuring the writer works in all environments (IDE, CLI, test runners).
@@ -32,6 +33,7 @@ uses
   System.IOUtils,
   System.Generics.Collections,
   System.DateUtils,
+  DX.Comply.DependencyGraph,
   DX.Comply.Engine.Intf;
 
 type
@@ -41,10 +43,9 @@ type
   TCycloneDxXmlWriter = class(TInterfacedObject, ISbomWriter)
   private
     const
-      cSpecVersion = '1.5';
-      cNamespace = 'http://cyclonedx.org/schema/bom/1.5';
+      cSpecVersion = '1.6';
+      cNamespace = 'http://cyclonedx.org/schema/bom/1.6';
       cToolName = 'DX.Comply';
-      cToolVersion = '1.0.0';
       cIndent = '  ';
   private
     FLines: TStringList;
@@ -57,9 +58,21 @@ type
     procedure AddElement(const ATag, AValue: string);
     procedure AddPropertyElements(const AProperties: TArray<TSbomProperty>);
     procedure BuildMetadata(const AMetadata: TSbomMetadata; const AProjectInfo: TProjectInfo);
-    procedure BuildComponent(const AArtefact: TArtefactInfo; const AIndex: Integer);
-    procedure BuildComponents(const AArtefacts: TArtefactList);
-    procedure BuildDependencies(const AArtefacts: TArtefactList; const AProjectBomRef: string);
+    /// <summary>
+    /// Writes one component. ALicence is written as licenses when it is not
+    /// empty. The built program and own-code units use the product licence.
+    /// An Embarcadero unit uses its origin label. AVersion is the version
+    /// to write. The built program uses the product version when it has
+    /// none of its own.
+    /// </summary>
+    procedure BuildComponent(const AArtefact: TArtefactInfo; const AIndex: Integer;
+      AUnresolvedSource: Boolean; const ALicence, AVersion: string);
+    procedure BuildComponents(const AArtefacts: TArtefactList; const AMetadata: TSbomMetadata;
+      const AGraph: TUsesDependencyGraph; const AProjectName, AOutputFilePath,
+      AProjectVersion: string);
+    procedure BuildDependencies(const AArtefacts: TArtefactList;
+      const AProjectBomRef, AOutputFilePath: string; const AGraph: TUsesDependencyGraph;
+      const ACovered: TArray<Boolean>);
   public
     function Write(const AOutputPath: string;
       const AMetadata: TSbomMetadata;
@@ -72,7 +85,10 @@ type
 implementation
 
 uses
-  System.RegularExpressions;
+  System.RegularExpressions,
+  DX.Comply.ComponentManifest,
+  DX.Comply.Schema.Validator,
+  DX.Comply.VersionInfo;
 
 { TCycloneDxXmlWriter }
 
@@ -157,26 +173,39 @@ procedure TCycloneDxXmlWriter.BuildMetadata(const AMetadata: TSbomMetadata;
 begin
   OpenTag('metadata');
 
-  if AMetadata.Timestamp <> '' then
-    AddElement('timestamp', AMetadata.Timestamp)
-  else
-    AddElement('timestamp', DateToISO8601(Now, False));
+  // Timestamp in UTC with a Z suffix (BSI TR-03183-2 section 5.2.1).
+  AddElement('timestamp', FormatUtcTimestamp(AMetadata.Timestamp));
 
-  AddPropertyElements(AMetadata.Properties);
-
-  // CycloneDX 1.5 XML uses <tools><tool> (not <tools><components>)
+  // CycloneDX 1.6 metadata sequence: timestamp, lifecycles, tools, authors,
+  // component, manufacturer, manufacture, supplier, licenses, properties.
+  // tools/tool is still accepted by bom-1.6.xsd and is marked deprecated there.
   OpenTag('tools');
   OpenTag('tool');
   AddElement('vendor', 'Olaf Monien');
   AddElement('name', cToolName);
-  AddElement('version', cToolVersion);
+  AddElement('version', ResolveDxComplyToolVersion(AMetadata.ToolVersion));
   CloseTag('tool');
   CloseTag('tools');
 
   // Component (the project being documented). Prefer metadata overrides
-  // (CLI --product / --version) over values from the .dproj — issue #26.
-  OpenTag('component', 'type="application" bom-ref="' +
-    EscapeXml(AProjectInfo.ProjectName) + '"');
+  // (CLI --product / --version) over values from the .dproj. Issue #26.
+  // Component sequence places supplier before name and version.
+  OpenTag('component', 'type="' + EscapeXml(SbomRootComponentType(AMetadata)) +
+    '" bom-ref="' + EscapeXml(AProjectInfo.ProjectName) + '"');
+  if AMetadata.Supplier <> '' then
+  begin
+    OpenTag('supplier');
+    AddElement('name', AMetadata.Supplier);
+    if AMetadata.SupplierUrl <> '' then
+      AddElement('url', AMetadata.SupplierUrl);
+    if IsBsiEmailAddress(Trim(AMetadata.Supplier)) then
+    begin
+      OpenTag('contact');
+      AddElement('email', Trim(AMetadata.Supplier));
+      CloseTag('contact');
+    end;
+    CloseTag('supplier');
+  end;
   if AMetadata.ProductName <> '' then
     AddElement('name', AMetadata.ProductName)
   else
@@ -185,29 +214,52 @@ begin
     AddElement('version', AMetadata.ProductVersion)
   else if AProjectInfo.Version <> '' then
     AddElement('version', AProjectInfo.Version);
-  if AMetadata.Supplier <> '' then
-  begin
-    OpenTag('supplier');
-    AddElement('name', AMetadata.Supplier);
-    CloseTag('supplier');
-  end;
+  // bom-1.6 component order: version, then licenses, then purl, then properties.
+  AppendCycloneDxLicencesXml(FLines, AMetadata.Licence, '', FIndentLevel);
+  if Trim(AMetadata.Purl) <> '' then
+    AddElement('purl', AMetadata.Purl);
   AddPropertyElements(AMetadata.ComponentProperties);
   CloseTag('component');
+
+  // manufacturer follows component in the CycloneDX 1.6 metadata sequence.
+  // It is one organizational entity. The deprecated manufacture element is
+  // not written.
+  if BsiCreatorKind(AMetadata.SbomCreator) = 'email' then
+  begin
+    OpenTag('manufacturer');
+    OpenTag('contact');
+    AddElement('email', Trim(AMetadata.SbomCreator));
+    CloseTag('contact');
+    CloseTag('manufacturer');
+  end
+  else if BsiCreatorKind(AMetadata.SbomCreator) = 'url' then
+  begin
+    OpenTag('manufacturer');
+    AddElement('url', Trim(AMetadata.SbomCreator));
+    CloseTag('manufacturer');
+  end;
+
+  AddPropertyElements(AMetadata.Properties);
 
   CloseTag('metadata');
 end;
 
 procedure TCycloneDxXmlWriter.BuildComponent(const AArtefact: TArtefactInfo;
-  const AIndex: Integer);
+  const AIndex: Integer; AUnresolvedSource: Boolean;
+  const ALicence, AVersion: string);
 var
   LComponentType: string;
   LBomRef: string;
+  LFileName: string;
 begin
   if AArtefact.ArtefactType = 'application' then
     LComponentType := 'application'
+  else if AArtefact.ArtefactType = 'framework' then
+    LComponentType := 'framework'
   else if (AArtefact.ArtefactType = 'library') or (AArtefact.ArtefactType = 'unit-evidence') or
     (AArtefact.ArtefactType = 'package') or (AArtefact.ArtefactType = 'runtime-package') or
-    (AArtefact.ArtefactType = 'external-reference') then
+    (AArtefact.ArtefactType = 'external-reference') or
+    (AArtefact.ArtefactType = 'required-package') then
     LComponentType := 'library'
   else
     LComponentType := 'file';
@@ -216,26 +268,61 @@ begin
 
   OpenTag('component', 'type="' + LComponentType + '" bom-ref="' + EscapeXml(LBomRef) + '"');
 
-  AddElement('name', TPath.GetFileName(AArtefact.RelativePath));
+  AddElement('name', ArtefactComponentName(AArtefact));
 
-  if AArtefact.Hash <> '' then
-    AddElement('version', Copy(AArtefact.Hash, 1, 12));
+  // Same rule as the JSON writer. The built program with no version of
+  // its own uses the product version. A component that still has none
+  // has no version element.
+  if AVersion <> '' then
+    AddElement('version', AVersion);
 
-  AddElement('purl', 'file:' + AArtefact.RelativePath);
-
-  if AArtefact.Hash <> '' then
+  // Component sequence: name, version, then hashes, then purl, then properties.
+  if (AArtefact.Hash <> '') or (AArtefact.HashSha512 <> '') then
   begin
     OpenTag('hashes');
-    OpenTag('hash', 'alg="SHA-256"');
-    // Hash content goes directly without a sub-element
-    Dec(FIndentLevel);
-    // Replace last line with inline content
-    FLines[FLines.Count - 1] := StringOfChar(' ', FIndentLevel * 2) +
-      '<hash alg="SHA-256">' + LowerCase(AArtefact.Hash) + '</hash>';
+    if AArtefact.Hash <> '' then
+      AddLine('<hash alg="SHA-256">' + LowerCase(AArtefact.Hash) + '</hash>');
+    if AArtefact.HashSha512 <> '' then
+      AddLine('<hash alg="SHA-512">' + LowerCase(AArtefact.HashSha512) + '</hash>');
     CloseTag('hashes');
   end;
 
-  if (AArtefact.FileSize >= 0) or (Trim(AArtefact.Origin) <> '') then
+  // bom-1.6 places licenses after hashes. The built program carries the
+  // product licence (issue #131). An Embarcadero unit carries its origin
+  // label (issue #165). An own-code unit carries the product licence when
+  // one is set (issue #166). Empty writes nothing.
+  AppendCycloneDxLicencesXml(FLines, ALicence, '', FIndentLevel);
+
+  // A file has no package URL of its own, so no purl element is written.
+
+  // Component sequence places externalReferences after purl and before
+  // properties. The distribution url is the file: locator. bom-1.6 requires
+  // that url. The reference is written for a hashed executable or archive.
+  if (AArtefact.HashSha512 <> '') and
+     (IsBsiExecutableArtefact(AArtefact) or
+      IsBsiArchiveFileName(BsiComponentFileName(AArtefact.RelativePath))) then
+  begin
+    OpenTag('externalReferences');
+    OpenTag('reference', 'type="distribution"');
+    AddElement('url', 'file:' + AArtefact.RelativePath);
+    OpenTag('hashes');
+    AddLine('<hash alg="SHA-512">' + LowerCase(AArtefact.HashSha512) + '</hash>');
+    CloseTag('hashes');
+    CloseTag('reference');
+    CloseTag('externalReferences');
+  end;
+
+  // Evidence and confidence must be written for source-scanned DLLs, which
+  // have no file on disk (size -1) and an empty origin. Gating the whole
+  // block on size or origin dropped those properties. Issue #45.
+  // A file name is enough on its own: the TR properties still apply when
+  // the file could not be opened.
+  LFileName := BsiComponentFileName(AArtefact.RelativePath);
+  if (AArtefact.FileSize >= 0) or (Trim(AArtefact.Origin) <> '') or
+     (Trim(AArtefact.Evidence) <> '') or (Trim(AArtefact.Confidence) <> '') or
+     AArtefact.Conditional or (LFileName <> '') or AUnresolvedSource or
+     (AArtefact.LocationSource <> '') or (AArtefact.Location <> '') or
+     ComponentVersionFromFileDate(AArtefact, AVersion) then
   begin
     OpenTag('properties');
     if AArtefact.FileSize >= 0 then
@@ -266,32 +353,134 @@ begin
       FLines[FLines.Count - 1] := StringOfChar(' ', FIndentLevel * 2) +
         '<property name="net.developer-experts.dx-comply:confidence">' + EscapeXml(AArtefact.Confidence) + '</property>';
     end;
+    if AArtefact.Conditional then
+    begin
+      OpenTag('property', 'name="net.developer-experts.dx-comply:conditional"');
+      Dec(FIndentLevel);
+      FLines[FLines.Count - 1] := StringOfChar(' ', FIndentLevel * 2) +
+        '<property name="net.developer-experts.dx-comply:conditional">true</property>';
+    end;
+    if AArtefact.LibrarySourceFile and (AArtefact.RelativePath <> '') then
+      AddLine('<property name="net.developer-experts.dx-comply:relativePath">' +
+        EscapeXml(AArtefact.RelativePath) + '</property>');
+    // Issue #59: where a source-scanned DLL was found.
+    if AArtefact.LocationSource <> '' then
+      AddLine('<property name="net.developer-experts.dx-comply:locationSource">' +
+        EscapeXml(AArtefact.LocationSource) + '</property>');
+    if AArtefact.Location <> '' then
+      AddLine('<property name="net.developer-experts.dx-comply:location">' +
+        EscapeXml(AArtefact.Location) + '</property>');
+    // Issue #109: the version is the file modification time, not a real version.
+    // A product version used in place of that stand-in is not a file date.
+    if ComponentVersionFromFileDate(AArtefact, AVersion) then
+      AddLine('<property name="' + cVersionSourceProperty + '">' + cVersionSourceFileDate + '</property>');
+    if LFileName <> '' then
+    begin
+      AddLine('<property name="bsi:component:filename">' + EscapeXml(LFileName) + '</property>');
+      AddLine('<property name="bsi:component:executable">' +
+        BsiExecutableValue(AArtefact) + '</property>');
+      AddLine('<property name="bsi:component:archive">' +
+        EscapeXml(BsiArchiveValue(LFileName)) + '</property>');
+      AddLine('<property name="bsi:component:structured">' +
+        BsiStructuredValue(LFileName) + '</property>');
+    end;
+    if AUnresolvedSource then
+      AddLine('<property name="' + cUnresolvedDependenciesProperty + '">' +
+        cUnresolvedDependenciesValue + '</property>');
     CloseTag('properties');
   end;
 
   CloseTag('component');
 end;
 
-procedure TCycloneDxXmlWriter.BuildComponents(const AArtefacts: TArtefactList);
+procedure TCycloneDxXmlWriter.BuildComponents(const AArtefacts: TArtefactList;
+  const AMetadata: TSbomMetadata; const AGraph: TUsesDependencyGraph;
+  const AProjectName, AOutputFilePath, AProjectVersion: string);
 var
   I: Integer;
+  LRootIndex: Integer;
+  LManifest: TComponentManifest;
+  LLicenceError: string;
+  LLicence: string;
+  LIsDeliverable: Boolean;
 begin
   OpenTag('components');
+  LRootIndex := FindDeliverableTargetIndex(AArtefacts, AProjectName, AOutputFilePath);
+  LManifest := Default(TComponentManifest);
+  if Trim(AMetadata.ComponentManifestJson) <> '' then
+  begin
+    // A failed parse leaves the manifest unloaded. A non-empty error does too.
+    if not TryParseComponentManifest(AMetadata.ComponentManifestJson, '',
+      LManifest, LLicenceError) or (LLicenceError <> '') then
+      LManifest := Default(TComponentManifest);
+  end;
   for I := 0 to AArtefacts.Count - 1 do
-    BuildComponent(AArtefacts[I], I);
+  begin
+    LIsDeliverable := IsSameDeliverableFile(AArtefacts, I, LRootIndex);
+    LLicence := ComponentLicenceFor(AArtefacts[I], LIsDeliverable,
+      AMetadata.Licence, LManifest);
+    BuildComponent(AArtefacts[I], I, AGraph.Status[I] = uusMissingSource, LLicence,
+      ComponentVersionFor(AArtefacts[I], LIsDeliverable, AMetadata.ProductVersion,
+        AProjectVersion));
+  end;
+  // Library rows from a component manifest. Element order is owned by
+  // DX.Comply.ComponentManifest so this writer stays a thin hook.
+  if AMetadata.ComponentManifestJson <> '' then
+    AppendManifestLibrariesXml(FLines, AMetadata.ComponentManifestJson,
+      AArtefacts, FIndentLevel);
   CloseTag('components');
 end;
 
 procedure TCycloneDxXmlWriter.BuildDependencies(const AArtefacts: TArtefactList;
-  const AProjectBomRef: string);
+  const AProjectBomRef, AOutputFilePath: string; const AGraph: TUsesDependencyGraph;
+  const ACovered: TArray<Boolean>);
 var
   I: Integer;
+  LGroup: Integer;
+  LTargetIndex: Integer;
+  LChildCount: Integer;
 begin
+  // Same shape as the JSON writer: project -> deliverable, and the
+  // deliverable depends on runtime packages, external DLLs, and the units
+  // that no other unit uses. Category order is unchanged.
   OpenTag('dependencies');
+  LTargetIndex := FindDeliverableTargetIndex(AArtefacts, AProjectBomRef,
+    AOutputFilePath);
+
   OpenTag('dependency', 'ref="' + EscapeXml(AProjectBomRef) + '"');
-  for I := 0 to AArtefacts.Count - 1 do
-    AddLine('<dependency ref="comp-' + IntToStr(I) + '"/>');
+  if LTargetIndex >= 0 then
+    AddLine('<dependency ref="comp-' + IntToStr(LTargetIndex) + '"/>')
+  else if Assigned(AArtefacts) then
+    for I := 0 to AArtefacts.Count - 1 do
+      if not IsCoveredUnit(ACovered, I) then
+        AddLine('<dependency ref="comp-' + IntToStr(I) + '"/>');
   CloseTag('dependency');
+
+  if (LTargetIndex >= 0) and Assigned(AArtefacts) and (AArtefacts.Count > 1) then
+  begin
+    LChildCount := 0;
+    for LGroup := 0 to 3 do
+      for I := 0 to AArtefacts.Count - 1 do
+        if (I <> LTargetIndex) and
+           (ArtefactDependencyGroup(AArtefacts[I]) = LGroup) and
+           not IsCoveredUnit(ACovered, I) then
+          Inc(LChildCount);
+    if LChildCount > 0 then
+    begin
+      OpenTag('dependency', 'ref="comp-' + IntToStr(LTargetIndex) + '"');
+      for LGroup := 0 to 3 do
+        for I := 0 to AArtefacts.Count - 1 do
+          if (I <> LTargetIndex) and
+             (ArtefactDependencyGroup(AArtefacts[I]) = LGroup) and
+             not IsCoveredUnit(ACovered, I) then
+            AddLine('<dependency ref="comp-' + IntToStr(I) + '"/>');
+      CloseTag('dependency');
+    end;
+  end;
+
+  // FIndentLevel is the child level of <dependencies>. The helper indents
+  // from the dependencies element itself.
+  WriteUsesDependenciesXml(FLines, FIndentLevel - 1, AGraph);
   CloseTag('dependencies');
 end;
 
@@ -301,6 +490,12 @@ function TCycloneDxXmlWriter.Write(const AOutputPath: string;
   const AProjectInfo: TProjectInfo): Boolean;
 var
   LOutputDir: string;
+  LGraph: TUsesDependencyGraph;
+  LCovered: TArray<Boolean>;
+  LLibraries, LIncomplete, LComplete: TArray<string>;
+  LGroups: TArray<TLibraryCompositionGroup>;
+  LGroup: TLibraryCompositionGroup;
+  LRef: string;
 begin
   Result := False;
   if AOutputPath = '' then
@@ -321,9 +516,69 @@ begin
     OpenTag('bom', 'xmlns="' + cNamespace + '" version="1" serialNumber="urn:uuid:' +
       GenerateUuid + '"');
 
+    LGraph := BuildUsesDependencyGraph(AArtefacts);
+    LCovered := UnitsCoveredByUsesEdges(AArtefacts, LGraph);
     BuildMetadata(AMetadata, AProjectInfo);
-    BuildComponents(AArtefacts);
-    BuildDependencies(AArtefacts, AProjectInfo.ProjectName);
+    BuildComponents(AArtefacts, AMetadata, LGraph, AProjectInfo.ProjectName,
+      AProjectInfo.OutputFilePath, AProjectInfo.Version);
+    if AMetadata.ComponentManifestJson <> '' then
+      AppendManifestDependenciesXml(FLines, AMetadata.ComponentManifestJson,
+        AArtefacts, AProjectInfo.ProjectName, FIndentLevel, LGraph, LCovered,
+        AProjectInfo.OutputFilePath)
+    else
+      BuildDependencies(AArtefacts, AProjectInfo.ProjectName,
+        AProjectInfo.OutputFilePath, LGraph, LCovered);
+
+    if AMetadata.LibraryCompositions then
+    begin
+      LGroups := BuildLibraryCompositionGroups(AArtefacts, AProjectInfo.ProjectName,
+        AMetadata.LibraryFilesComplete, AMetadata.LibraryRequiresDeclared);
+      if Length(LGroups) > 0 then
+      begin
+        OpenTag('compositions');
+        for LGroup in LGroups do
+        begin
+          if Length(LGroup.Refs) = 0 then
+            Continue;
+          OpenTag('composition');
+          AddElement('aggregate', LGroup.Aggregate);
+          OpenTag('dependencies');
+          for LRef in LGroup.Refs do
+            AddLine('<dependency ref="' + EscapeXml(LRef) + '"/>');
+          CloseTag('dependencies');
+          CloseTag('composition');
+        end;
+        CloseTag('compositions');
+      end;
+    end
+    else
+    begin
+    LLibraries := ManifestLibraryBomRefs(AMetadata.ComponentManifestJson, AArtefacts);
+    BuildCompositionRefLists(AProjectInfo.ProjectName, LGraph, LLibraries,
+      LIncomplete, LComplete);
+    if Length(LIncomplete) > 0 then
+    begin
+      OpenTag('compositions');
+      OpenTag('composition');
+      AddElement('aggregate', 'incomplete');
+      OpenTag('dependencies');
+      for LRef in LIncomplete do
+        AddLine('<dependency ref="' + EscapeXml(LRef) + '"/>');
+      CloseTag('dependencies');
+      CloseTag('composition');
+      if Length(LComplete) > 0 then
+      begin
+        OpenTag('composition');
+        AddElement('aggregate', 'complete');
+        OpenTag('dependencies');
+        for LRef in LComplete do
+          AddLine('<dependency ref="' + EscapeXml(LRef) + '"/>');
+        CloseTag('dependencies');
+        CloseTag('composition');
+      end;
+      CloseTag('compositions');
+    end;
+    end;
 
     CloseTag('bom');
 
@@ -372,6 +627,11 @@ begin
 
   // Check for metadata section
   if Pos('<metadata', AContent) = 0 then
+    Exit;
+
+  // Presence of the expected tags is not enough: metadata.properties before
+  // tools, or component.purl before hashes, is invalid against bom-1.6.xsd.
+  if Length(CycloneDxXmlSequenceErrors(AContent)) > 0 then
     Exit;
 
   Result := True;

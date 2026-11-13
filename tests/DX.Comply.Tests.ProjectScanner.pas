@@ -7,8 +7,8 @@
 /// Uses DX.Comply.Engine.dproj as a real-file fixture to verify
 /// project-metadata extraction (name, platform, output directory,
 /// runtime packages) and path validation logic.
-/// The engine .dproj is located relative to the test executable which
-/// is placed in build\$(Platform)\$(Config) by the build system.
+/// The engine .dproj is located through RepoRoot in DX.Comply.Tests.Paths,
+/// so the executable does not have to sit in build\$(Platform)\$(Config).
 /// </remarks>
 ///
 /// <copyright>
@@ -37,8 +37,7 @@ type
   private
     FScanner: IProjectScanner;
     /// <summary>
-    /// Absolute path to DX.Comply.Engine.dproj, resolved from the test
-    /// executable location (build\Win32\Debug\ -> ..\..\..\src\).
+    /// Absolute path to DX.Comply.Engine.dproj, resolved by RepoRoot.
     /// </summary>
     FEngineDprojPath: string;
   public
@@ -107,6 +106,154 @@ type
     [Test]
     procedure Scan_EngineDproj_InfersMapFilePath;
 
+    /// <summary>
+    /// Android MAP names are libProject.so.map. Win32 and Win64 stay
+    /// Project.map. Regression for issue #89.
+    /// </summary>
+    [Test]
+    procedure ExpectedMapFileName_Android_UsesLibSoMap;
+
+    /// <summary>
+    /// Desktop, iOS, macOS, and Linux MAP names stay Project.map, with the
+    /// package suffix. Regression for issue #89.
+    /// </summary>
+    [Test]
+    procedure ExpectedMapFileName_Desktop_Unchanged;
+
+    /// <summary>
+    /// The built file name follows the platform. Android is libProject.so.
+    /// Regression for issue #99.
+    /// </summary>
+    [Test]
+    procedure PrimaryOutputFileName_FollowsPlatform;
+
+    /// <summary>
+    /// A scanned Android application names libProject.so, not Project.exe.
+    /// Linux, macOS, and iOS device applications have no extension.
+    /// Packages stay in the BPL directory. Regression for issue #99.
+    /// </summary>
+    [Test]
+    procedure Scan_PlatformOutputFile_UsesPlatformName;
+
+    /// <summary>VerInfo_Keys CompanyName fills TProjectInfo.CompanyName (issue #88).</summary>
+    [Test]
+    procedure Scan_VerInfoKeysCompanyName_FillsCompanyName;
+
+    /// <summary>ExtractVerInfoKeyValue reads one key and ignores macros.</summary>
+    [Test]
+    procedure ExtractVerInfoKeyValue_ReadsKey;
+
+    /// <summary>
+    /// The value comes from raw .dproj XML. "&amp;amp;" is one character of the
+    /// name, and its ';' does not end the value.
+    /// </summary>
+    [Test]
+    procedure ExtractVerInfoKeyValue_DecodesXmlEntities;
+
+    /// <summary>
+    /// Two &amp; entities in one CompanyName decode to the full name, and
+    /// the following keys stay in place.
+    /// </summary>
+    [Test]
+    procedure ExtractVerInfoKeyValue_TwoAmpersands_DecodesFullName;
+
+    /// <summary>
+    /// Android32, Android32Arm, and AndroidArm use the folder Android.
+    /// Android64Arm and AndroidARM64 use Android64. Other Delphi platform
+    /// names are already the folder name.
+    /// </summary>
+    [Test]
+    procedure PlatformOutputDirectoryName_MapsAndroidFolders;
+
+    /// <summary>
+    /// A dotted version keeps every character of each component. 16 stays 16.
+    /// </summary>
+    [Test]
+    procedure PreserveDottedVersion_KeepsEveryComponent;
+
+    /// <summary>
+    /// A 32-bit Android scan writes under Android\Config, including a custom
+    /// DCC_ExeOutput prefix. The reported platform stays Android32.
+    /// </summary>
+    [Test]
+    procedure Scan_Android32_OutputUsesAndroidFolder;
+
+    /// <summary>
+    /// Android64 keeps the folder Android64. It is not folded into Android.
+    /// </summary>
+    [Test]
+    procedure Scan_Android64_OutputStaysAndroid64;
+
+    /// <summary>
+    /// When libMyApp.so and its map already exist under Android\Release,
+    /// an Android32 scan uses those files.
+    /// </summary>
+    [Test]
+    procedure Scan_Android32_FindsFilesInAndroidFolder;
+
+    /// <summary>
+    /// When the Delphi folder has no binary and the caller's folder does,
+    /// that existing file is used.
+    /// </summary>
+    [Test]
+    procedure Scan_Android32_FallsBackToCallerFolder;
+
+    /// <summary>
+    /// With no DCC_ExeOutput, an existing Android\Config directory is the
+    /// output directory.
+    /// </summary>
+    [Test]
+    procedure Scan_Android_NoExeOutput_UsesExistingPlatformFolder;
+
+    /// <summary>
+    /// With no DCC_ExeOutput and no platform folder on disk, the project
+    /// directory is the output directory.
+    /// </summary>
+    [Test]
+    procedure Scan_Android_NoExeOutput_UsesProjectDirectory;
+
+    /// <summary>
+    /// versionName in Base_Android replaces the default 1.0.0.x. A sibling
+    /// Android64 group is not applied. Android32 reads the same group.
+    /// </summary>
+    [Test]
+    procedure Scan_Android_VersionName_IsProductVersion;
+
+    /// <summary>
+    /// VerInfo_MajorVer in Cfg_2_Android is used when versionName and
+    /// FileVersion are both absent.
+    /// </summary>
+    [Test]
+    procedure Scan_Android_MajorVer_WhenKeysHaveNoVersion;
+
+    /// <summary>
+    /// FileVersion in the Android keys wins over versionName.
+    /// </summary>
+    [Test]
+    procedure Scan_Android_FileVersion_WinsOverVersionName;
+
+    /// <summary>
+    /// A Windows scan keeps FileVersion and does not read versionName.
+    /// </summary>
+    [Test]
+    procedure Scan_Win32_IgnoresAndroidVersionName;
+
+    /// <summary>
+    /// An Android application scan expects libProject.so.map and does not
+    /// accept a desktop Project.map in that directory. Win32 stays
+    /// Project.map. Regression for issue #89.
+    /// </summary>
+    [Test]
+    procedure Scan_AndroidApp_MapPath_LibSoName_DesktopUnchanged;
+
+    /// <summary>
+    /// An Android package scan expects libProject plus DllSuffix plus
+    /// .so.map. The Win64 name stays Project plus DllSuffix plus .map.
+    /// Regression for issue #89.
+    /// </summary>
+    [Test]
+    procedure Scan_AndroidPackage_MapPath_KeepsSuffix;
+
     /// <summary>ProjectDir must be the src directory containing the dproj.</summary>
     [Test]
     procedure Scan_EngineDproj_ProjectDirIsValid;
@@ -170,9 +317,228 @@ type
     /// </summary>
     [Test]
     procedure Scan_DprojWithEnvVarInOutputDir_ExpandsEnvVar;
+
+    /// <summary>
+    /// A $(Name) that only exists as an IDE environment variable override
+    /// is expanded (issue #80).
+    /// </summary>
+    [Test]
+    procedure Scan_IdeOverrideInOutputDir_ExpandsOverride;
+
+    /// <summary>
+    /// An override whose value uses another variable is expanded too.
+    /// </summary>
+    [Test]
+    procedure Scan_NestedIdeOverride_ExpandsBothLevels;
+
+    /// <summary>
+    /// A variable that refers to itself must not loop forever.
+    /// </summary>
+    [Test]
+    procedure Scan_SelfReferencingOverride_Terminates;
+
+    /// <summary>
+    /// The process environment wins over an IDE override of the same name.
+    /// </summary>
+    [Test]
+    procedure Scan_ProcessEnvAndIdeOverride_ProcessEnvWins;
+
+    /// <summary>
+    /// An unknown variable produces one warning that names it.
+    /// </summary>
+    [Test]
+    procedure Scan_UnknownVariable_WarningNamesIt;
+
+    /// <summary>
+    /// A search path entry that starts with a variable, such as
+    /// $(MyRoot)\Source, is expanded instead of dropped.
+    /// </summary>
+    [Test]
+    procedure Scan_SearchPathStartingWithVariable_ExpandsIt;
+
+    /// <summary>
+    /// A search path entry whose variable stays unresolved is skipped,
+    /// wherever the variable is in the entry.
+    /// </summary>
+    [Test]
+    procedure Scan_SearchPathWithUnknownVariable_SkipsEntries;
+
+    /// <summary>
+    /// A platform group that appends to the search path with
+    /// $(DCC_UnitSearchPath) keeps the entries of the base group, as MSBuild does.
+    /// </summary>
+    [Test]
+    procedure Scan_PlatformSearchPath_KeepsInheritedEntries;
+
+    /// <summary>
+    /// A platform group that appends to the unit scope names with
+    /// $(DCC_Namespace) keeps the names of the base group.
+    /// </summary>
+    [Test]
+    procedure Scan_PlatformNamespace_KeepsInheritedNames;
+
+    /// <summary>
+    /// A variable that holds several paths separated by ';' yields one search
+    /// path entry per path, because the value is expanded before it is split.
+    /// </summary>
+    [Test]
+    procedure Scan_SearchPathVariableWithSeveralPaths_AddsEachPath;
+
+    /// <summary>
+    /// Base, Base_Win32, and Cfg_1_Win32 each prepend an entry with
+    /// x;$(DCC_UnitSearchPath). All three entries are kept.
+    /// </summary>
+    [Test]
+    procedure Scan_ThreeLevelSearchPathChain_KeepsAllLevels;
+
+    /// <summary>
+    /// The group of a platform whose name only starts with the scanned one
+    /// (Android64 for Android, Win64x for Win64) is not read.
+    /// </summary>
+    [Test]
+    procedure Scan_PlatformConfigGroup_IgnoresLongerPlatformName;
+
+    /// <summary>
+    /// $(DCC_UnitSearchPath) in the first group that defines it is empty
+    /// when no variable of that name exists. It is not reported as unresolved.
+    /// </summary>
+    [Test]
+    procedure Scan_SelfReferenceWithoutPriorValue_IsEmpty;
+
+    /// <summary>
+    /// $(DCC_UnitSearchPath) in the first group that defines it takes the
+    /// environment variable of the same name when there is one.
+    /// </summary>
+    [Test]
+    procedure Scan_SelfReferenceWithoutPriorValue_UsesEnvironment;
+
+    /// <summary>
+    /// An empty element in a later group clears the inherited value.
+    /// </summary>
+    [Test]
+    procedure Scan_EmptyElementInLaterGroup_ClearsInheritedValue;
+
+    /// <summary>
+    /// A self-closing element in a later group clears the inherited value.
+    /// </summary>
+    [Test]
+    procedure Scan_SelfClosingElementInLaterGroup_ClearsInheritedValue;
+
+    /// <summary>
+    /// SetBdsVersion selects the BDS version, and the scan reports it and its source.
+    /// </summary>
+    [Test]
+    procedure Scan_BdsVersionOption_IsUsedAndReported;
+
+    /// <summary>
+    /// Without SetBdsVersion the scan still reports which BDS version it used.
+    /// </summary>
+    [Test]
+    procedure Scan_WithoutBdsVersionOption_ReportsVersion;
+
+    /// <summary>A BDS version without a dot gets .0, so 23 becomes 23.0.</summary>
+    [Test]
+    procedure NormalizeBdsVersion_AddsMinorVersion;
+
+    /// <summary>
+    /// The engine package output is the BPL name plus DllSuffix, in the
+    /// active config/platform output directory.
+    /// </summary>
+    [Test]
+    procedure Scan_EngineDproj_ResolvesPackageOutputFile;
+
+    /// <summary>A library output name includes DllSuffix before .dll.</summary>
+    [Test]
+    procedure Scan_LibraryDproj_AppendsDllSuffix;
+
+    /// <summary>An application output name does not include DllSuffix.</summary>
+    [Test]
+    procedure Scan_ApplicationDproj_IgnoresDllSuffix;
+
+    /// <summary>
+    /// A package whose BPL folder differs from DCC_ExeOutput is named in the
+    /// BPL folder.
+    /// </summary>
+    [Test]
+    procedure Scan_PackageDproj_UsesBplOutputDir;
+
+    /// <summary>
+    /// When AppType is absent, a source file that starts with library is a dll.
+    /// </summary>
+    [Test]
+    procedure Scan_LibrarySource_DetectedWithoutAppType;
+
+    /// <summary>
+    /// An unresolved $(Auto) suffix must not invent an output file name.
+    /// </summary>
+    [Test]
+    procedure Scan_UnresolvedDllSuffix_LeavesOutputFileEmpty;
+
+    /// <summary>
+    /// When only the command-line directory exists (ProductVersion empty),
+    /// that directory is the output path and it contains no $(...).
+    /// </summary>
+    [Test]
+    procedure Scan_ProductVersion_UsesEmptyDirWhenThatIsTheOnlyOne;
+
+    /// <summary>
+    /// When the directory with the BDS version exists, that directory wins.
+    /// </summary>
+    [Test]
+    procedure Scan_ProductVersion_UsesExpandedDirWhenItExists;
+
+    /// <summary>
+    /// DCC_UsePackage without UsePackages is the IDE default list and is not linked.
+    /// </summary>
+    [Test]
+    procedure Scan_UsePackagesMissing_ReturnsNoRuntimePackages;
+
+    /// <summary>UsePackages true in Base returns the declared packages.</summary>
+    [Test]
+    procedure Scan_UsePackagesTrueInBase_ReturnsPackages;
+
+    /// <summary>
+    /// UsePackages true only in another configuration does not apply here.
+    /// </summary>
+    [Test]
+    procedure Scan_UsePackagesTrueInOtherConfig_ReturnsNone;
+
+    /// <summary>
+    /// A readable PE keeps only packages whose BPL name is imported.
+    /// </summary>
+    [Test]
+    procedure Scan_UsePackages_PeImports_KeepsOnlyImportedPackages;
+
+    /// <summary>
+    /// A file that is not a valid PE keeps the UsePackages list.
+    /// </summary>
+    [Test]
+    procedure Scan_UsePackages_UnreadablePe_KeepsDeclaredPackages;
+
+    /// <summary>A minimal PE32 import directory yields the DLL name.</summary>
+    [Test]
+    procedure TryReadPeImportNames_SyntheticPe32_ReadsDllName;
+
+    /// <summary>A minimal PE32+ import directory yields the DLL name.</summary>
+    [Test]
+    procedure TryReadPeImportNames_SyntheticPe32Plus_ReadsDllName;
+
+    /// <summary>A truncated MZ file is a failure, not an empty import list.</summary>
+    [Test]
+    procedure TryReadPeImportNames_Malformed_ReturnsFalse;
+
+    /// <summary>The running test executable imports no BPL.</summary>
+    [Test]
+    procedure TryReadPeImportNames_TestExecutable_HasNoBplImports;
   end;
 
 implementation
+
+uses
+  System.Generics.Collections,
+  DX.Comply.Tests.Paths;
+
+function MakeTempDir: string; forward;
 
 { TProjectScannerTests }
 
@@ -180,14 +546,10 @@ procedure TProjectScannerTests.Setup;
 begin
   FScanner := TProjectScanner.Create;
 
-  // Compute path to DX.Comply.Engine.dproj from the test binary location.
-  // Test binary lands in:  <repo>\build\<Platform>\<Config>\DX.Comply.Tests.exe
-  // Engine dproj is at:    <repo>\src\DX.Comply.Engine.dproj
-  // So we go up three levels then into src\.
-  FEngineDprojPath := TPath.GetFullPath(
-    TPath.Combine(TPath.GetDirectoryName(ParamStr(0)),
-      '..' + PathDelim + '..' + PathDelim + '..' + PathDelim +
-      'src' + PathDelim + 'DX.Comply.Engine.dproj'));
+  // Engine dproj is at <repo>\src\DX.Comply.Engine.dproj. RepoRoot finds the
+  // checkout when the executable is outside build\(platform)\(config)\.
+  FEngineDprojPath := TPath.Combine(RepoRoot,
+    'src' + PathDelim + 'DX.Comply.Engine.dproj');
 end;
 
 procedure TProjectScannerTests.TearDown;
@@ -283,6 +645,8 @@ begin
   try
     Assert.IsNotNull(LProjectInfo.RuntimePackages,
       'RuntimePackages must be assigned (not nil) after scanning');
+    Assert.AreEqual(NativeInt(0), NativeInt(LProjectInfo.RuntimePackages.Count),
+      'The engine .dproj lists DCC_UsePackage but does not set UsePackages');
   finally
     LProjectInfo.Free;
   end;
@@ -362,6 +726,1136 @@ begin
       'MapFilePath must be inferred from OutputDir, ProjectName and DllSuffix');
   finally
     LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.ExpectedMapFileName_Android_UsesLibSoMap;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := TProjectInfo.Create;
+  try
+    LProjectInfo.ProjectName := 'CustomernameApp';
+    LProjectInfo.MainSourcePath := 'C:\App\CustomernameApp.dpr';
+
+    LProjectInfo.Platform := 'Android64';
+    Assert.IsTrue(LProjectInfo.IsAndroidPlatform,
+      'Android64 must be an Android target');
+    Assert.AreEqual('libCustomernameApp.so.map', LProjectInfo.ExpectedMapFileName,
+      'Android64 application MAP is lib<Project>.so.map');
+
+    LProjectInfo.Platform := 'Android32';
+    Assert.AreEqual('libCustomernameApp.so.map', LProjectInfo.ExpectedMapFileName,
+      'Android32 uses the same shared-library MAP name');
+
+    LProjectInfo.Platform := 'Android';
+    Assert.AreEqual('libCustomernameApp.so.map', LProjectInfo.ExpectedMapFileName,
+      'The legacy Android platform name uses the same MAP name');
+
+    LProjectInfo.Platform := 'android64';
+    Assert.AreEqual('libCustomernameApp.so.map', LProjectInfo.ExpectedMapFileName,
+      'Platform matching is case-insensitive');
+
+    LProjectInfo.ProjectName := 'Cipher';
+    LProjectInfo.MainSourcePath := 'C:\Pkg\Cipher.dpk';
+    LProjectInfo.DllSuffix := '_FMX';
+    LProjectInfo.Platform := 'Android64';
+    Assert.AreEqual('libCipher_FMX.so.map', LProjectInfo.ExpectedMapFileName,
+      'Android package MAP keeps DllSuffix inside lib<Name>.so.map');
+
+    LProjectInfo.ProjectName := 'Cipher_FMX';
+    LProjectInfo.DllSuffix := '';
+    Assert.AreEqual('libCipher_FMX.so.map', LProjectInfo.ExpectedMapFileName,
+      'A package whose name already includes the suffix uses that name');
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.ExpectedMapFileName_Desktop_Unchanged;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := TProjectInfo.Create;
+  try
+    LProjectInfo.ProjectName := 'CustomernameApp';
+    LProjectInfo.MainSourcePath := 'C:\App\CustomernameApp.dpr';
+
+    LProjectInfo.Platform := 'Win32';
+    Assert.IsFalse(LProjectInfo.IsAndroidPlatform, 'Win32 is not Android');
+    Assert.AreEqual('CustomernameApp.map', LProjectInfo.ExpectedMapFileName,
+      'Win32 MAP stays <Project>.map');
+
+    LProjectInfo.Platform := 'Win64';
+    Assert.AreEqual('CustomernameApp.map', LProjectInfo.ExpectedMapFileName,
+      'Win64 MAP stays <Project>.map');
+
+    LProjectInfo.Platform := 'Win64x';
+    Assert.AreEqual('CustomernameApp.map', LProjectInfo.ExpectedMapFileName,
+      'Win64x MAP stays <Project>.map');
+
+    LProjectInfo.Platform := '';
+    Assert.AreEqual('CustomernameApp.map', LProjectInfo.ExpectedMapFileName,
+      'An empty platform keeps the desktop MAP name');
+
+    LProjectInfo.ProjectName := 'Cipher';
+    LProjectInfo.MainSourcePath := 'C:\Pkg\Cipher.dpk';
+    LProjectInfo.DllSuffix := '_FMX';
+    LProjectInfo.Platform := 'Win64';
+    Assert.AreEqual('Cipher_FMX.map', LProjectInfo.ExpectedMapFileName,
+      'Desktop package MAP still appends DllSuffix');
+
+    LProjectInfo.Platform := 'iOSDevice64';
+    Assert.IsFalse(LProjectInfo.IsAndroidPlatform, 'iOS is not Android');
+    Assert.AreEqual('Cipher_FMX.map', LProjectInfo.ExpectedMapFileName,
+      'iOS keeps the desktop MAP name');
+
+    LProjectInfo.Platform := 'Linux64';
+    Assert.AreEqual('Cipher_FMX.map', LProjectInfo.ExpectedMapFileName,
+      'Linux keeps the desktop MAP name');
+
+    LProjectInfo.Platform := 'OSXARM64';
+    Assert.AreEqual('Cipher_FMX.map', LProjectInfo.ExpectedMapFileName,
+      'macOS keeps the desktop MAP name');
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.PrimaryOutputFileName_FollowsPlatform;
+begin
+  Assert.AreEqual('AndroidApp.exe',
+    PrimaryOutputFileName('Win32', 'AndroidApp', '290', pokApplication),
+    'Win32 applications stay Project.exe and ignore DllSuffix');
+  Assert.AreEqual('AndroidApp.exe',
+    PrimaryOutputFileName('Win64', 'AndroidApp', '', pokApplication));
+  Assert.AreEqual('AndroidApp.exe',
+    PrimaryOutputFileName('Win64x', 'AndroidApp', '', pokApplication),
+    'Win64x keeps the Windows executable name');
+  Assert.AreEqual('AndroidApp.exe',
+    PrimaryOutputFileName('', 'AndroidApp', '', pokApplication),
+    'An empty platform keeps the Windows executable name');
+  Assert.AreEqual('Demo_sfx.dll',
+    PrimaryOutputFileName('Win64', 'Demo', '_sfx', pokLibrary));
+  Assert.AreEqual('Demo290.bpl',
+    PrimaryOutputFileName('Win32', 'Demo', '290', pokPackage));
+
+  Assert.AreEqual('libAndroidApp.so',
+    PrimaryOutputFileName('Android64', 'AndroidApp', '', pokApplication),
+    'Android64 applications are libProject.so');
+  Assert.AreEqual('libAndroidApp.so',
+    PrimaryOutputFileName('Android32', 'AndroidApp', '290', pokApplication),
+    'Android32 applications ignore DllSuffix');
+  Assert.AreEqual('libAndroidApp.so',
+    PrimaryOutputFileName('android64', 'AndroidApp', '', pokApplication),
+    'Android platform matching is case-insensitive');
+  Assert.AreEqual('libAndroidApp.so',
+    PrimaryOutputFileName('Android', 'AndroidApp', '', pokApplication));
+  Assert.AreEqual('libDemo_sfx.so',
+    PrimaryOutputFileName('Android64', 'Demo', '_sfx', pokLibrary));
+  Assert.AreEqual('libDemo290.so',
+    PrimaryOutputFileName('Android64', 'Demo', '290', pokPackage),
+    'Android packages use the lib prefix and .so, with DllSuffix');
+
+  Assert.AreEqual('CustomernameApp',
+    PrimaryOutputFileName('Linux64', 'CustomernameApp', '', pokApplication),
+    'Linux64 applications have no extension');
+  Assert.AreEqual('libDemo_sfx.so',
+    PrimaryOutputFileName('Linux64', 'Demo', '_sfx', pokLibrary));
+  Assert.AreEqual('bplDemo290.so',
+    PrimaryOutputFileName('Linux64', 'Demo', '290', pokPackage));
+  Assert.AreEqual('CustomernameApp',
+    PrimaryOutputFileName('LinuxARM64', 'CustomernameApp', '', pokApplication));
+
+  Assert.AreEqual('CustomernameApp',
+    PrimaryOutputFileName('OSX64', 'CustomernameApp', '', pokApplication),
+    'macOS applications have no extension');
+  Assert.AreEqual('CustomernameApp',
+    PrimaryOutputFileName('OSXARM64', 'CustomernameApp', '', pokApplication));
+  Assert.AreEqual('libDemo_sfx.dylib',
+    PrimaryOutputFileName('OSX64', 'Demo', '_sfx', pokLibrary));
+  Assert.AreEqual('bplDemo290.dylib',
+    PrimaryOutputFileName('OSXARM64', 'Demo', '290', pokPackage));
+
+  Assert.AreEqual('CustomernameApp',
+    PrimaryOutputFileName('iOSDevice64', 'CustomernameApp', '', pokApplication),
+    'iOS device applications are extensionless Mach-O files');
+  Assert.AreEqual('CustomernameApp',
+    PrimaryOutputFileName('iOSDevice32', 'CustomernameApp', '', pokApplication));
+  Assert.AreEqual('libDemo_sfx.a',
+    PrimaryOutputFileName('iOSDevice64', 'Demo', '_sfx', pokLibrary),
+    'iOS device libraries are static archives');
+  Assert.AreEqual('libDemo290.a',
+    PrimaryOutputFileName('iOSDevice64', 'Demo', '290', pokPackage));
+  Assert.AreEqual('libDemo290.a',
+    PrimaryOutputFileName('iOSSimARM64', 'Demo', '290', pokPackage),
+    'iOSSimARM64 follows the iOS device static-library names');
+  Assert.AreEqual('bplDemo290.dylib',
+    PrimaryOutputFileName('iOSSimulator', 'Demo', '290', pokPackage),
+    'The 32-bit iOS simulator keeps the macOS package name');
+
+  Assert.AreEqual('',
+    PrimaryOutputFileName('Android64', '', '', pokApplication),
+    'An empty project name produces no file name');
+  Assert.AreEqual('application', PrimaryOutputArtefactType(pokApplication));
+  Assert.AreEqual('library', PrimaryOutputArtefactType(pokLibrary));
+  Assert.AreEqual('package', PrimaryOutputArtefactType(pokPackage));
+  Assert.AreEqual('application', PrimaryOutputArtefactType(pokUnknown));
+end;
+
+procedure TProjectScannerTests.Scan_VerInfoKeysCompanyName_FillsCompanyName;
+const
+  cDproj =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>VerApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+    '    <VerInfo_Keys>CompanyName=Acme Software GmbH;FileDescription=$(MSBuildProjectName);' +
+    'FileVersion=1.2.0.0;ProductName=VerApp</VerInfo_Keys>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+var
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := TPath.Combine(TPath.GetTempPath, 'DXComplyTest_VerInfoCompany88');
+  ForceDirectories(LTempDir);
+  try
+    LDproj := TPath.Combine(LTempDir, 'VerApp.dproj');
+    TFile.WriteAllText(LDproj, cDproj, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LDproj, 'Win32', 'Release');
+    try
+      Assert.AreEqual('Acme Software GmbH', LProjectInfo.CompanyName);
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.ExtractVerInfoKeyValue_ReadsKey;
+begin
+  Assert.AreEqual('Acme', ExtractVerInfoKeyValue('FileVersion=1.0;CompanyName=Acme;ProductName=X', 'CompanyName'));
+  Assert.AreEqual('Acme', ExtractVerInfoKeyValue('companyname = Acme ', 'CompanyName'));
+  Assert.AreEqual('', ExtractVerInfoKeyValue('CompanyName=;FileVersion=1.0', 'CompanyName'));
+  Assert.AreEqual('', ExtractVerInfoKeyValue('CompanyName=$(Company);FileVersion=1.0', 'CompanyName'));
+  Assert.AreEqual('', ExtractVerInfoKeyValue('FileVersion=1.0', 'CompanyName'));
+  Assert.AreEqual('', ExtractVerInfoKeyValue('', 'CompanyName'));
+end;
+
+procedure TProjectScannerTests.ExtractVerInfoKeyValue_TwoAmpersands_DecodesFullName;
+const
+  cName = 'ebm-papst Mulfingen GmbH & Co. KGaA & Co. KG';
+  cKeys = 'CompanyName=ebm-papst Mulfingen GmbH &amp; Co. KGaA &amp; Co. KG;FileVersion=1.2.3.4;ProductName=Fan;';
+begin
+  Assert.AreEqual(cName, ExtractVerInfoKeyValue(cKeys, 'CompanyName'));
+  Assert.AreEqual('1.2.3.4', ExtractVerInfoKeyValue(cKeys, 'FileVersion'),
+    'The key after the two entities must still be found');
+  Assert.AreEqual('Fan', ExtractVerInfoKeyValue(cKeys, 'ProductName'));
+end;
+
+function PathHasSegment(const APath, ASegment: string): Boolean;
+var
+  LPart: string;
+begin
+  Result := False;
+  for LPart in APath.Split(['\', '/']) do
+    if SameText(LPart, ASegment) then
+      Exit(True);
+end;
+
+function HasWarningText(const AProjectInfo: TProjectInfo; const AText: string): Boolean;
+var
+  LWarning: string;
+begin
+  Result := False;
+  for LWarning in AProjectInfo.Warnings do
+    if Pos(AText, LWarning) > 0 then
+      Exit(True);
+end;
+
+/// <summary>
+/// A Delphi 12/13 style Android application .dproj. AExeOutput is the
+/// DCC_ExeOutput element body. An empty value omits that element.
+/// ABplOutput, ADcpOutput, and ADcuOutput are the other output elements.
+/// </summary>
+function AndroidAppDproj(const AExeOutput: string;
+  const ABplOutput: string = ''; const ADcpOutput: string = '';
+  const ADcuOutput: string = ''): string;
+var
+  LOutput: string;
+begin
+  LOutput := '';
+  if AExeOutput <> '' then
+    LOutput := LOutput + '    <DCC_ExeOutput>' + AExeOutput + '</DCC_ExeOutput>' + sLineBreak;
+  if ABplOutput <> '' then
+    LOutput := LOutput + '    <DCC_BplOutput>' + ABplOutput + '</DCC_BplOutput>' + sLineBreak;
+  if ADcpOutput <> '' then
+    LOutput := LOutput + '    <DCC_DcpOutput>' + ADcpOutput + '</DCC_DcpOutput>' + sLineBreak;
+  if ADcuOutput <> '' then
+    LOutput := LOutput + '    <DCC_DcuOutput>' + ADcuOutput + '</DCC_DcuOutput>' + sLineBreak;
+  Result :=
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>MyApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '    <ProjectVersion>20.4</ProjectVersion>' + sLineBreak +
+    '    <TargetedPlatforms>288</TargetedPlatforms>' + sLineBreak +
+         LOutput +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <ItemGroup>' + sLineBreak +
+    '    <BuildConfiguration Include="Release">' + sLineBreak +
+    '      <Key>Cfg_2</Key>' + sLineBreak +
+    '      <CfgParent>Base</CfgParent>' + sLineBreak +
+    '    </BuildConfiguration>' + sLineBreak +
+    '  </ItemGroup>' + sLineBreak +
+    '  <ProjectExtensions>' + sLineBreak +
+    '    <BorlandProject>' + sLineBreak +
+    '      <Platforms>' + sLineBreak +
+    '        <Platform value="Android">True</Platform>' + sLineBreak +
+    '        <Platform value="Android64">True</Platform>' + sLineBreak +
+    '      </Platforms>' + sLineBreak +
+    '    </BorlandProject>' + sLineBreak +
+    '  </ProjectExtensions>' + sLineBreak +
+    '</Project>';
+end;
+
+function WriteProject(const ADir, AXml: string): string;
+begin
+  ForceDirectories(ADir);
+  Result := TPath.Combine(ADir, 'MyApp.dproj');
+  TFile.WriteAllText(Result, AXml, TEncoding.UTF8);
+end;
+
+procedure TProjectScannerTests.PlatformOutputDirectoryName_MapsAndroidFolders;
+begin
+  Assert.AreEqual('Android', PlatformOutputDirectoryName('Android32'));
+  Assert.AreEqual('Android', PlatformOutputDirectoryName('android32'));
+  Assert.AreEqual('Android', PlatformOutputDirectoryName('Android32Arm'));
+  Assert.AreEqual('Android', PlatformOutputDirectoryName('AndroidArm'));
+  Assert.AreEqual('Android', PlatformOutputDirectoryName('Android'));
+  Assert.AreEqual('Android64', PlatformOutputDirectoryName('Android64'));
+  Assert.AreEqual('Android64', PlatformOutputDirectoryName('Android64Arm'));
+  Assert.AreEqual('Android64', PlatformOutputDirectoryName('AndroidARM64'));
+  Assert.AreEqual('Win32', PlatformOutputDirectoryName('Win32'));
+  Assert.AreEqual('Win64', PlatformOutputDirectoryName('Win64'));
+  Assert.AreEqual('Win64x', PlatformOutputDirectoryName('Win64x'));
+  Assert.AreEqual('OSX32', PlatformOutputDirectoryName('OSX32'));
+  Assert.AreEqual('OSX64', PlatformOutputDirectoryName('OSX64'));
+  Assert.AreEqual('OSXARM64', PlatformOutputDirectoryName('OSXARM64'));
+  Assert.AreEqual('iOSSimulator', PlatformOutputDirectoryName('iOSSimulator'));
+  Assert.AreEqual('iOSDevice32', PlatformOutputDirectoryName('iOSDevice32'));
+  Assert.AreEqual('iOSDevice64', PlatformOutputDirectoryName('iOSDevice64'));
+  Assert.AreEqual('iOSSimARM64', PlatformOutputDirectoryName('iOSSimARM64'));
+  Assert.AreEqual('Linux64', PlatformOutputDirectoryName('Linux64'));
+  Assert.AreEqual('LinuxARM64', PlatformOutputDirectoryName('LinuxARM64'));
+end;
+
+procedure TProjectScannerTests.PreserveDottedVersion_KeepsEveryComponent;
+begin
+  Assert.AreEqual('16.0.0.7', PreserveDottedVersion('16.0.0.7'));
+  Assert.AreEqual('16.0.0.7', PreserveDottedVersion(' 16.0.0.7 '));
+  Assert.AreEqual('16.0.0', PreserveDottedVersion('16.0.0'));
+  Assert.AreEqual('01.02.03.04', PreserveDottedVersion('01.02.03.04'));
+  Assert.AreEqual('16', PreserveDottedVersion('16'));
+  Assert.AreEqual('', PreserveDottedVersion(''));
+end;
+
+procedure TProjectScannerTests.Scan_Android32_OutputUsesAndroidFolder;
+var
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LDproj := WriteProject(LTempDir, AndroidAppDproj(
+      '.\Source\$(Platform)\$(Config)',
+      '.\bpl\$(Platform)\$(Config)',
+      '.\dcp\$(Platform)\$(Config)',
+      '.\dcu\$(Platform)\$(Config)'));
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LDproj, 'Android32', 'Release');
+    try
+      Assert.AreEqual('Android32', LProjectInfo.Platform,
+        'The requested platform name is kept');
+      Assert.IsTrue(LProjectInfo.OutputFilePath.EndsWith(
+        '\Source\Android\Release\libMyApp.so', True),
+        'The binary must use the Android folder, but was: ' + LProjectInfo.OutputFilePath);
+      Assert.IsTrue(LProjectInfo.BplOutputDir.EndsWith('\bpl\Android\Release', True),
+        'DCC_BplOutput must expand $(Platform) to Android, but was: ' + LProjectInfo.BplOutputDir);
+      Assert.IsTrue(LProjectInfo.DcpOutputDir.EndsWith('\dcp\Android\Release', True),
+        'DCC_DcpOutput must expand $(Platform) to Android, but was: ' + LProjectInfo.DcpOutputDir);
+      Assert.IsTrue(LProjectInfo.DcuOutputDir.EndsWith('\dcu\Android\Release', True),
+        'DCC_DcuOutput must expand $(Platform) to Android, but was: ' + LProjectInfo.DcuOutputDir);
+      Assert.IsFalse(PathHasSegment(LProjectInfo.OutputFilePath, 'Android32'),
+        'Android32 must not be a path segment');
+      Assert.IsTrue(LProjectInfo.MapFilePath.EndsWith(
+        '\Source\Android\Release\libMyApp.so.map', True),
+        'The map must sit next to the binary, but was: ' + LProjectInfo.MapFilePath);
+      Assert.IsFalse(HasWarningText(LProjectInfo, 'TargetedPlatforms'),
+        'Android32 is the same target as Android');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_Android64_OutputStaysAndroid64;
+var
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LDproj := WriteProject(LTempDir, AndroidAppDproj('.\Source\$(Platform)\$(Config)'));
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LDproj, 'Android64', 'Release');
+    try
+      Assert.IsTrue(LProjectInfo.OutputFilePath.EndsWith(
+        '\Source\Android64\Release\libMyApp.so', True),
+        'Android64 keeps its own folder, but was: ' + LProjectInfo.OutputFilePath);
+      Assert.IsTrue(PathHasSegment(LProjectInfo.OutputFilePath, 'Android64'));
+      Assert.IsFalse(PathHasSegment(LProjectInfo.OutputFilePath, 'Android'),
+        'Android64 must not be rewritten to Android');
+      Assert.IsTrue(LProjectInfo.MapFilePath.EndsWith(
+        '\Source\Android64\Release\libMyApp.so.map', True),
+        'The Android64 map stays in Android64, but was: ' + LProjectInfo.MapFilePath);
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_Android32_FindsFilesInAndroidFolder;
+var
+  LBinDir: string;
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LDproj := WriteProject(LTempDir, AndroidAppDproj('.\Source\$(Platform)\$(Config)'));
+    LBinDir := TPath.Combine(LTempDir, 'Source\Android\Release');
+    ForceDirectories(LBinDir);
+    TFile.WriteAllText(TPath.Combine(LBinDir, 'libMyApp.so'), 'so', TEncoding.UTF8);
+    TFile.WriteAllText(TPath.Combine(LBinDir, 'libMyApp.so.map'), 'map', TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LDproj, 'Android32', 'Release');
+    try
+      Assert.AreEqual(TPath.Combine(LBinDir, 'libMyApp.so'), LProjectInfo.OutputFilePath,
+        'The existing Android binary is the output');
+      Assert.AreEqual(TPath.Combine(LBinDir, 'libMyApp.so.map'), LProjectInfo.MapFilePath,
+        'The existing Android map is the map path');
+      Assert.IsTrue(TFile.Exists(LProjectInfo.OutputFilePath));
+      Assert.IsTrue(TFile.Exists(LProjectInfo.MapFilePath));
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_Android32_FallsBackToCallerFolder;
+var
+  LAltDir: string;
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LDproj := WriteProject(LTempDir, AndroidAppDproj('.\Source\$(Platform)\$(Config)'));
+    LAltDir := TPath.Combine(LTempDir, 'Source\Android32\Release');
+    ForceDirectories(LAltDir);
+    TFile.WriteAllText(TPath.Combine(LAltDir, 'libMyApp.so'), 'so', TEncoding.UTF8);
+    TFile.WriteAllText(TPath.Combine(LAltDir, 'libMyApp.so.map'), 'map', TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LDproj, 'Android32', 'Release');
+    try
+      Assert.AreEqual(TPath.Combine(LAltDir, 'libMyApp.so'), LProjectInfo.OutputFilePath,
+        'A binary that is only under Android32 is still found');
+      Assert.AreEqual(TPath.Combine(LAltDir, 'libMyApp.so.map'), LProjectInfo.MapFilePath,
+        'A map that is only under Android32 is still found');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_Android_NoExeOutput_UsesExistingPlatformFolder;
+var
+  LBinDir: string;
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LDproj := WriteProject(LTempDir, AndroidAppDproj(''));
+    LBinDir := TPath.Combine(LTempDir, 'Android\Release');
+    ForceDirectories(LBinDir);
+    TFile.WriteAllText(TPath.Combine(LBinDir, 'libMyApp.so'), 'so', TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LDproj, 'Android32', 'Release');
+    try
+      Assert.AreEqual(TPath.Combine(LBinDir, 'libMyApp.so'), LProjectInfo.OutputFilePath,
+        'With no DCC_ExeOutput, an existing Android\Release folder is the output');
+      Assert.IsFalse(HasWarningText(LProjectInfo, 'project directory'),
+        'The project directory must not be used when the platform folder exists');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_Android_NoExeOutput_UsesProjectDirectory;
+var
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LDproj := WriteProject(LTempDir, AndroidAppDproj(''));
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LDproj, 'Android', 'Release');
+    try
+      Assert.AreEqual(LProjectInfo.ProjectDir, LProjectInfo.OutputDir,
+        'With no output setting and no platform folder, the project directory is used');
+      Assert.IsTrue(HasWarningText(LProjectInfo, 'project directory'),
+        'The fallback must be reported');
+      Assert.AreEqual(TPath.Combine(LProjectInfo.ProjectDir, 'libMyApp.so'),
+        LProjectInfo.OutputFilePath);
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+function AndroidVersionDproj: string;
+begin
+  // Base carries the Windows default 1.0.0.7. Android replaces VerInfo_Keys
+  // with versionName. The Android64 group uses the long condition Delphi
+  // writes, which also contains $(Cfg_2), and must not leak into Android.
+  Result :=
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>MyApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '    <ProjectVersion>20.4</ProjectVersion>' + sLineBreak +
+    '    <TargetedPlatforms>288</TargetedPlatforms>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+    '    <VerInfo_IncludeVerInfo>true</VerInfo_IncludeVerInfo>' + sLineBreak +
+    '    <VerInfo_MajorVer>1</VerInfo_MajorVer>' + sLineBreak +
+    '    <VerInfo_MinorVer>0</VerInfo_MinorVer>' + sLineBreak +
+    '    <VerInfo_Release>0</VerInfo_Release>' + sLineBreak +
+    '    <VerInfo_Build>7</VerInfo_Build>' + sLineBreak +
+    '    <VerInfo_Keys>CompanyName=Acme;FileDescription=$(MSBuildProjectName);FileVersion=1.0.0.7;InternalName=;LegalCopyright=;LegalTrademarks=;OriginalFilename=;ProductName=$(MSBuildProjectName);ProductVersion=1.0.0.7;Comments=</VerInfo_Keys>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base_Android)''!=''''">' + sLineBreak +
+    '    <VerInfo_Keys>package=com.embarcadero.MyApp;label=My App;versionCode=1;versionName=2.0.0.1;persistent=False;restoreAnyVersion=False;installLocation=auto</VerInfo_Keys>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base_Android64)''!=''''">' + sLineBreak +
+    '    <VerInfo_Keys>package=com.embarcadero.MyApp;label=My App;versionCode=3142;versionName=3.1.4.2</VerInfo_Keys>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="(''$(Platform)''==''Android'' and ''$(Cfg_2)''==''true'') or ''$(Cfg_2_Android)''!=''''">' + sLineBreak +
+    '    <VerInfo_Keys>package=com.embarcadero.MyApp;label=My App;versionCode=160007;versionName=16.0.0.7;persistent=False;restoreAnyVersion=False;installLocation=auto</VerInfo_Keys>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="(''$(Platform)''==''Android64'' and ''$(Cfg_2)''==''true'') or ''$(Cfg_2_Android64)''!=''''">' + sLineBreak +
+    '    <VerInfo_Keys>package=com.embarcadero.MyApp;label=My App;versionCode=9999;versionName=9.9.9.9</VerInfo_Keys>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <ItemGroup>' + sLineBreak +
+    '    <BuildConfiguration Include="Base">' + sLineBreak +
+    '      <Key>Base</Key>' + sLineBreak +
+    '    </BuildConfiguration>' + sLineBreak +
+    '    <BuildConfiguration Include="Debug">' + sLineBreak +
+    '      <Key>Cfg_1</Key>' + sLineBreak +
+    '      <CfgParent>Base</CfgParent>' + sLineBreak +
+    '    </BuildConfiguration>' + sLineBreak +
+    '    <BuildConfiguration Include="Release">' + sLineBreak +
+    '      <Key>Cfg_2</Key>' + sLineBreak +
+    '      <CfgParent>Base</CfgParent>' + sLineBreak +
+    '    </BuildConfiguration>' + sLineBreak +
+    '  </ItemGroup>' + sLineBreak +
+    '</Project>';
+end;
+
+procedure TProjectScannerTests.Scan_Android_VersionName_IsProductVersion;
+var
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LDproj := WriteProject(LTempDir, AndroidVersionDproj);
+    LScanner := TProjectScanner.Create;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Android', 'Release');
+    try
+      Assert.AreEqual('16.0.0.7', LProjectInfo.Version,
+        'versionName from Cfg_2_Android is the product version, not 1.0.0.7');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Android32', 'Release');
+    try
+      Assert.AreEqual('16.0.0.7', LProjectInfo.Version,
+        'Android32 reads the Android property groups');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Android64', 'Release');
+    try
+      Assert.AreEqual('9.9.9.9', LProjectInfo.Version,
+        'Android64 uses its own versionName');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_Android_MajorVer_WhenKeysHaveNoVersion;
+const
+  cDproj =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>MyApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+    '    <VerInfo_MajorVer>1</VerInfo_MajorVer>' + sLineBreak +
+    '    <VerInfo_MinorVer>0</VerInfo_MinorVer>' + sLineBreak +
+    '    <VerInfo_Release>0</VerInfo_Release>' + sLineBreak +
+    '    <VerInfo_Build>0</VerInfo_Build>' + sLineBreak +
+    '    <VerInfo_Keys>CompanyName=Acme;ProductName=My App</VerInfo_Keys>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="(''$(Platform)''==''Android'' and ''$(Cfg_2)''==''true'') or ''$(Cfg_2_Android)''!=''''">' + sLineBreak +
+    '    <VerInfo_MajorVer>16</VerInfo_MajorVer>' + sLineBreak +
+    '    <VerInfo_MinorVer>0</VerInfo_MinorVer>' + sLineBreak +
+    '    <VerInfo_Release>0</VerInfo_Release>' + sLineBreak +
+    '    <VerInfo_Build>7</VerInfo_Build>' + sLineBreak +
+    '    <VerInfo_Keys>package=com.embarcadero.MyApp;label=My App;versionCode=160007</VerInfo_Keys>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="(''$(Platform)''==''Android64'' and ''$(Cfg_2)''==''true'') or ''$(Cfg_2_Android64)''!=''''">' + sLineBreak +
+    '    <VerInfo_MajorVer>9</VerInfo_MajorVer>' + sLineBreak +
+    '    <VerInfo_Build>9</VerInfo_Build>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+var
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LDproj := WriteProject(LTempDir, cDproj);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LDproj, 'Android32', 'Release');
+    try
+      Assert.AreEqual('16.0.0.7', LProjectInfo.Version,
+        'The Android major version must not stay at the base value 1');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_Android_FileVersion_WinsOverVersionName;
+const
+  cDproj =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>MyApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base_Android)''!=''''">' + sLineBreak +
+    '    <VerInfo_Keys>FileVersion=4.5.6.7;versionCode=160007;versionName=16.0.0.7</VerInfo_Keys>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+var
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LDproj := WriteProject(LTempDir, cDproj);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LDproj, 'Android', 'Release');
+    try
+      Assert.AreEqual('4.5.6.7', LProjectInfo.Version,
+        'FileVersion wins when the Android keys contain both values');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_Win32_IgnoresAndroidVersionName;
+const
+  cWithFileVersion =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>MyApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '    <VerInfo_Keys>FileVersion=16.0.0.7;versionName=9.9.9.9;CompanyName=Acme</VerInfo_Keys>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+  cNameOnly =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>MyApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '    <VerInfo_MajorVer>1</VerInfo_MajorVer>' + sLineBreak +
+    '    <VerInfo_MinorVer>0</VerInfo_MinorVer>' + sLineBreak +
+    '    <VerInfo_Release>0</VerInfo_Release>' + sLineBreak +
+    '    <VerInfo_Build>7</VerInfo_Build>' + sLineBreak +
+    '    <VerInfo_Keys>versionName=16.0.0.7;CompanyName=Acme</VerInfo_Keys>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+var
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LScanner := TProjectScanner.Create;
+    LDproj := WriteProject(LTempDir, cWithFileVersion);
+    LProjectInfo := LScanner.Scan(LDproj, 'Win32', 'Release');
+    try
+      Assert.AreEqual('16.0.0.7', LProjectInfo.Version,
+        'Win32 FileVersion is kept in full');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    TFile.WriteAllText(LDproj, cNameOnly, TEncoding.UTF8);
+    LProjectInfo := LScanner.Scan(LDproj, 'Win32', 'Release');
+    try
+      Assert.AreEqual('1.0.0.7', LProjectInfo.Version,
+        'Win32 does not take versionName');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.ExtractVerInfoKeyValue_DecodesXmlEntities;
+begin
+  Assert.AreEqual('Smith & Sons Ltd',
+    ExtractVerInfoKeyValue('CompanyName=Smith &amp; Sons Ltd;FileVersion=1.0.0.0', 'CompanyName'));
+  Assert.AreEqual('1.0.0.0',
+    ExtractVerInfoKeyValue('CompanyName=Smith &amp; Sons Ltd;FileVersion=1.0.0.0', 'FileVersion'),
+    'The key after the entity must still be found');
+  Assert.AreEqual('A & B',
+    ExtractVerInfoKeyValue('FileVersion=1.0;CompanyName=A &amp; B', 'CompanyName'),
+    'An entity in the last pair');
+  Assert.AreEqual('Tom''s "Tools" <EU>',
+    ExtractVerInfoKeyValue('CompanyName=Tom&apos;s &quot;Tools&quot; &lt;EU&gt;;ProductName=X', 'CompanyName'));
+  Assert.AreEqual('A & B',
+    ExtractVerInfoKeyValue('CompanyName=A &#38; B;ProductName=X', 'CompanyName'),
+    'A decimal character reference');
+  Assert.AreEqual('A & B',
+    ExtractVerInfoKeyValue('CompanyName=A &#x26; B;ProductName=X', 'CompanyName'),
+    'A hexadecimal character reference');
+  Assert.AreEqual('Fish & Chips',
+    ExtractVerInfoKeyValue('CompanyName=Fish & Chips;ProductName=X', 'CompanyName'),
+    'A bare ampersand stays as it is');
+end;
+
+procedure TProjectScannerTests.Scan_PlatformOutputFile_UsesPlatformName;
+const
+  cAppDproj =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>AndroidApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '    <DllSuffix>$(Auto)</DllSuffix>' + sLineBreak +
+    '    <DCC_ExeOutput>.\out\$(Platform)\$(Config)</DCC_ExeOutput>' + sLineBreak +
+    '    <DCC_BplOutput>.\bpl\$(Platform)\$(Config)</DCC_BplOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+  cPackageDproj =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>Demo.dpk</MainSource>' + sLineBreak +
+    '    <AppType>Package</AppType>' + sLineBreak +
+    '    <DllSuffix>290</DllSuffix>' + sLineBreak +
+    '    <DCC_ExeOutput>.\bin</DCC_ExeOutput>' + sLineBreak +
+    '    <DCC_BplOutput>.\bpl\$(Platform)\$(Config)</DCC_BplOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+var
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+  LWarning: string;
+begin
+  LTempDir := TPath.Combine(TPath.GetTempPath, 'DXComplyTest_OutputName99');
+  ForceDirectories(LTempDir);
+  try
+    LDproj := TPath.Combine(LTempDir, 'AndroidApp.dproj');
+    TFile.WriteAllText(LDproj, cAppDproj, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Android64', 'Release');
+    try
+      Assert.AreEqual(pokApplication, LProjectInfo.OutputKind);
+      Assert.AreEqual('libAndroidApp.so', TPath.GetFileName(LProjectInfo.OutputFilePath),
+        'Android64 must not look for AndroidApp.exe, but was: ' + LProjectInfo.OutputFilePath);
+      Assert.IsTrue(Pos('Android64', LProjectInfo.OutputFilePath) > 0,
+        'The Android output path must contain the platform');
+      Assert.IsTrue(Pos('.exe', LProjectInfo.OutputFilePath) = 0,
+        'The Android output path must not use .exe');
+      for LWarning in LProjectInfo.Warnings do
+        Assert.IsTrue(Pos('DllSuffix', LWarning) = 0,
+          'An Android application must not warn about DllSuffix: ' + LWarning);
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Android32', 'Release');
+    try
+      Assert.AreEqual('libAndroidApp.so', TPath.GetFileName(LProjectInfo.OutputFilePath),
+        'Android32 uses the same shared-library name');
+      Assert.IsTrue(Pos('\Android\', LProjectInfo.OutputFilePath) > 0,
+        'Android32 must use the Android folder, but was: ' + LProjectInfo.OutputFilePath);
+      Assert.IsTrue(Pos('Android32', LProjectInfo.OutputFilePath) = 0,
+        'Android32 is not an output folder, but was: ' + LProjectInfo.OutputFilePath);
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Linux64', 'Release');
+    try
+      Assert.AreEqual('AndroidApp', TPath.GetFileName(LProjectInfo.OutputFilePath),
+        'Linux64 applications have no extension, but was: ' + LProjectInfo.OutputFilePath);
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'OSX64', 'Release');
+    try
+      Assert.AreEqual('AndroidApp', TPath.GetFileName(LProjectInfo.OutputFilePath),
+        'macOS applications have no extension');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'iOSDevice64', 'Release');
+    try
+      Assert.AreEqual('AndroidApp', TPath.GetFileName(LProjectInfo.OutputFilePath),
+        'iOS device applications have no extension');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Win64', 'Release');
+    try
+      Assert.AreEqual('AndroidApp.exe', TPath.GetFileName(LProjectInfo.OutputFilePath),
+        'Win64 applications stay Project.exe');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LDproj := TPath.Combine(LTempDir, 'Demo.dproj');
+    TFile.WriteAllText(LDproj, cPackageDproj, TEncoding.UTF8);
+    LProjectInfo := LScanner.Scan(LDproj, 'Linux64', 'Release');
+    try
+      Assert.AreEqual(pokPackage, LProjectInfo.OutputKind);
+      Assert.AreEqual('bplDemo290.so', TPath.GetFileName(LProjectInfo.OutputFilePath),
+        'Linux packages are bpl<Name><DllSuffix>.so, but was: ' + LProjectInfo.OutputFilePath);
+      Assert.IsTrue(LProjectInfo.OutputFilePath.StartsWith(LProjectInfo.BplOutputDir),
+        'A Linux package must still be written to the BPL directory, but was: ' +
+        LProjectInfo.OutputFilePath);
+      Assert.AreNotEqual(LProjectInfo.OutputDir, LProjectInfo.ArtefactOutputDir,
+        'A Linux package must not be taken from DCC_ExeOutput');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'OSXARM64', 'Release');
+    try
+      Assert.AreEqual('bplDemo290.dylib', TPath.GetFileName(LProjectInfo.OutputFilePath));
+      Assert.IsTrue(LProjectInfo.OutputFilePath.StartsWith(LProjectInfo.BplOutputDir),
+        'A macOS package must be written to the BPL directory');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Android64', 'Release');
+    try
+      Assert.AreEqual('libDemo290.so', TPath.GetFileName(LProjectInfo.OutputFilePath),
+        'An Android package keeps DllSuffix inside lib<Name>.so');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_AndroidApp_MapPath_LibSoName_DesktopUnchanged;
+const
+  cDproj =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>CustomernameApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '    <DCC_ExeOutput>.\out\$(Platform)\$(Config)</DCC_ExeOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+var
+  LAndroidMap: string;
+  LAndroidOut: string;
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+  LWinMap: string;
+  LWinOut: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LDproj := TPath.Combine(LTempDir, 'CustomernameApp.dproj');
+    TFile.WriteAllText(LDproj, cDproj, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Android64', 'Release');
+    try
+      LAndroidOut := LProjectInfo.OutputDir;
+      LAndroidMap := TPath.Combine(LAndroidOut, 'libCustomernameApp.so.map');
+      Assert.IsTrue(Pos('Android64', LAndroidOut) > 0,
+        'Android output directory must contain the platform: ' + LAndroidOut);
+      Assert.AreEqual(LAndroidMap, LProjectInfo.MapFilePath,
+        'Android MAP path must be lib<Project>.so.map in the output directory');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Win32', 'Release');
+    try
+      LWinOut := LProjectInfo.OutputDir;
+      LWinMap := TPath.Combine(LWinOut, 'CustomernameApp.map');
+      Assert.IsTrue(Pos('Win32', LWinOut) > 0,
+        'Win32 output directory must contain the platform: ' + LWinOut);
+      Assert.AreEqual(LWinMap, LProjectInfo.MapFilePath,
+        'Win32 MAP path must stay <Project>.map');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Win64', 'Release');
+    try
+      Assert.AreEqual(
+        TPath.Combine(LProjectInfo.OutputDir, 'CustomernameApp.map'),
+        LProjectInfo.MapFilePath,
+        'Win64 MAP path must stay <Project>.map');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    Assert.AreNotEqual(LAndroidOut, LWinOut,
+      'Android and Win32 must not share one output directory in this fixture');
+
+    // A desktop-named MAP in the Android output must not be selected, and an
+    // Android-named MAP in the Win32 output must not replace Project.map.
+    ForceDirectories(LAndroidOut);
+    ForceDirectories(LWinOut);
+    TFile.WriteAllText(TPath.Combine(LAndroidOut, 'CustomernameApp.map'),
+      'desktop', TEncoding.UTF8);
+    TFile.WriteAllText(TPath.Combine(LWinOut, 'libCustomernameApp.so.map'),
+      'android', TEncoding.UTF8);
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Android64', 'Release');
+    try
+      Assert.AreEqual(LAndroidMap, LProjectInfo.MapFilePath,
+        'Android must ignore CustomernameApp.map');
+      Assert.IsFalse(TFile.Exists(LProjectInfo.MapFilePath),
+        'The expected Android MAP is not the desktop file that is on disk');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Win32', 'Release');
+    try
+      Assert.AreEqual(LWinMap, LProjectInfo.MapFilePath,
+        'Win32 must ignore libCustomernameApp.so.map');
+      Assert.IsFalse(TFile.Exists(LProjectInfo.MapFilePath),
+        'The expected Win32 MAP is not the Android file that is on disk');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    TFile.WriteAllText(LAndroidMap, 'map', TEncoding.UTF8);
+    LProjectInfo := LScanner.Scan(LDproj, 'Android64', 'Release');
+    try
+      Assert.AreEqual(LAndroidMap, LProjectInfo.MapFilePath,
+        'Android scan must find the existing lib<Project>.so.map');
+      Assert.IsTrue(TFile.Exists(LProjectInfo.MapFilePath),
+        'The resolved Android MAP path must exist');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_AndroidPackage_MapPath_KeepsSuffix;
+const
+  cDproj =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>Cipher.dpk</MainSource>' + sLineBreak +
+    '    <AppType>Package</AppType>' + sLineBreak +
+    '    <DllSuffix>_FMX</DllSuffix>' + sLineBreak +
+    '    <DCC_ExeOutput>.\out\$(Platform)\$(Config)</DCC_ExeOutput>' + sLineBreak +
+    '    <DCC_BplOutput>.\bpl\$(Platform)\$(Config)</DCC_BplOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+var
+  LAndroidMap: string;
+  LBplDir: string;
+  LDproj: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    TFile.WriteAllText(TPath.Combine(LTempDir, 'Cipher.dpk'),
+      'package Cipher;' + sLineBreak + sLineBreak + 'end.' + sLineBreak,
+      TEncoding.UTF8);
+    LDproj := TPath.Combine(LTempDir, 'Cipher.dproj');
+    TFile.WriteAllText(LDproj, cDproj, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Android64', 'Release');
+    try
+      Assert.IsTrue(LProjectInfo.IsPackage, 'Cipher.dpk must be a package');
+      Assert.AreEqual('_FMX', LProjectInfo.EffectiveMapSuffix,
+        'The package MAP suffix must be DllSuffix');
+      Assert.AreEqual(
+        TPath.Combine(LProjectInfo.OutputDir, 'libCipher_FMX.so.map'),
+        LProjectInfo.MapFilePath,
+        'Android package MAP must be lib<Project><DllSuffix>.so.map');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Win64', 'Release');
+    try
+      Assert.AreEqual(
+        TPath.Combine(LProjectInfo.OutputDir, 'Cipher_FMX.map'),
+        LProjectInfo.MapFilePath,
+        'Win64 package MAP must stay <Project><DllSuffix>.map');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Win32', 'Debug');
+    try
+      Assert.AreEqual(
+        TPath.Combine(LProjectInfo.OutputDir, 'Cipher_FMX.map'),
+        LProjectInfo.MapFilePath,
+        'Win32 package MAP must stay <Project><DllSuffix>.map');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    // The real file sits in the BPL directory. A desktop-named MAP in the
+    // exe directory must not hide it.
+    LProjectInfo := LScanner.Scan(LDproj, 'Android64', 'Release');
+    try
+      LBplDir := LProjectInfo.BplOutputDir;
+      ForceDirectories(LBplDir);
+      ForceDirectories(LProjectInfo.OutputDir);
+      TFile.WriteAllText(TPath.Combine(LProjectInfo.OutputDir, 'Cipher_FMX.map'),
+        'desktop', TEncoding.UTF8);
+      LAndroidMap := TPath.Combine(LBplDir, 'libCipher_FMX.so.map');
+      TFile.WriteAllText(LAndroidMap, 'map', TEncoding.UTF8);
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Android64', 'Release');
+    try
+      Assert.AreEqual(LAndroidMap, LProjectInfo.MapFilePath,
+        'Android package scan must find lib<Project><DllSuffix>.so.map in the BPL directory');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
   end;
 end;
 
@@ -741,6 +2235,1290 @@ begin
   finally
     Winapi.Windows.SetEnvironmentVariable(PChar(cEnvVarName), nil);
   end;
+end;
+
+// ---- IDE environment variable overrides (issue #80) ------------------------
+
+function OverrideDproj(const AExeOutput: string): string;
+begin
+  Result :=
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>OverrideApp.dpr</MainSource>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Configuration)|$(Platform)''==''Release|Win32''">' + sLineBreak +
+    '    <DCC_ExeOutput>' + AExeOutput + '</DCC_ExeOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+end;
+
+/// <summary>
+/// Scans a temporary .dproj with ADprojContent for Win32 Release, with
+/// AOverrides (name, value pairs) as the IDE override source. The caller frees the result.
+/// </summary>
+function ScanDprojWithOverrides(const ADprojContent: string;
+  const AOverrides: array of string; const ABdsVersion: string = ''): TProjectInfo;
+var
+  LOverrides: TDictionary<string, string>;
+  LScanner: TProjectScanner;
+  LScannerIntf: IProjectScanner;
+  LTempDir: string;
+  LTempDproj: string;
+begin
+  LOverrides := TDictionary<string, string>.Create;
+  try
+    var i := 0;
+    while i < High(AOverrides) do
+    begin
+      LOverrides.Add(UpperCase(AOverrides[i]), AOverrides[i + 1]);
+      Inc(i, 2);
+    end;
+
+    LTempDir := TPath.Combine(TPath.GetTempPath, 'DXComplyTest_IdeOverride');
+    ForceDirectories(LTempDir);
+    LTempDproj := TPath.Combine(LTempDir, 'OverrideApp.dproj');
+    try
+      TFile.WriteAllText(LTempDproj, ADprojContent, TEncoding.UTF8);
+      LScanner := TProjectScanner.Create;
+      LScannerIntf := LScanner;
+      LScanner.SetIdeOverrideLookup(
+        function(const AName: string; out AValue: string): Boolean
+        begin
+          Result := LOverrides.TryGetValue(UpperCase(AName), AValue);
+        end);
+      LScannerIntf.SetBdsVersion(ABdsVersion);
+      Result := LScannerIntf.Scan(LTempDproj, 'Win32', 'Release');
+    finally
+      if TFile.Exists(LTempDproj) then
+      begin
+        TFile.Delete(LTempDproj);
+      end;
+      if TDirectory.Exists(LTempDir) then
+      begin
+        TDirectory.Delete(LTempDir);
+      end;
+    end;
+  finally
+    LOverrides.Free;
+  end;
+end;
+
+/// <summary>
+/// Scans a temporary .dproj whose DCC_ExeOutput is AExeOutput, with
+/// AOverrides (name, value pairs) as the IDE override source. The caller frees the result.
+/// </summary>
+function ScanWithOverrides(const AExeOutput: string; const AOverrides: array of string): TProjectInfo;
+begin
+  Result := ScanDprojWithOverrides(OverrideDproj(AExeOutput), AOverrides);
+end;
+
+function ProgressText(const AInfo: TProjectInfo): string;
+var
+  LNote: string;
+begin
+  Result := '';
+  if not Assigned(AInfo.ProgressNotes) then
+    Exit;
+  for LNote in AInfo.ProgressNotes do
+    Result := Result + LNote + sLineBreak;
+end;
+
+// ---- Search path variables and property inheritance -------------------------
+
+/// <summary>
+/// A .dproj whose base group holds ABaseElements and whose Win32 group holds
+/// AWin32Elements. Both are raw XML elements and may be empty.
+/// </summary>
+function InheritanceDproj(const ABaseElements, AWin32Elements: string): string;
+begin
+  Result :=
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>OverrideApp.dpr</MainSource>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+    '    ' + ABaseElements + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base_Win32)''!=''''">' + sLineBreak +
+    '    ' + AWin32Elements + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+end;
+
+/// <summary>
+/// A .dproj with Base, Base_Win32, and Cfg_1_Win32 groups, where Cfg_1 is
+/// the Release configuration. Each group gets its own raw XML elements.
+/// </summary>
+function ThreeLevelDproj(const ABaseElements, AWin32Elements, ACfgElements: string): string;
+begin
+  Result :=
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>OverrideApp.dpr</MainSource>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+    '    ' + ABaseElements + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base_Win32)''!=''''">' + sLineBreak +
+    '    ' + AWin32Elements + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Cfg_1_Win32)''!=''''">' + sLineBreak +
+    '    ' + ACfgElements + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <ItemGroup>' + sLineBreak +
+    '    <BuildConfiguration Include="Release">' + sLineBreak +
+    '      <Key>Cfg_1</Key>' + sLineBreak +
+    '    </BuildConfiguration>' + sLineBreak +
+    '  </ItemGroup>' + sLineBreak +
+    '</Project>';
+end;
+
+/// <summary>
+/// True when AList holds AValue, ignoring case.
+/// </summary>
+function HasEntry(const AList: TList<string>; const AValue: string): Boolean;
+var
+  LEntry: string;
+begin
+  Result := False;
+  for LEntry in AList do
+  begin
+    if SameText(LEntry, AValue) then
+    begin
+      Exit(True);
+    end;
+  end;
+end;
+
+/// <summary>
+/// AList as one semicolon-separated string, for assertion messages.
+/// </summary>
+function JoinEntries(const AList: TList<string>): string;
+begin
+  Result := string.Join(';', AList.ToArray);
+end;
+
+procedure TProjectScannerTests.Scan_IdeOverrideInOutputDir_ExpandsOverride;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  // Mixed case on purpose: the IDE matches names case-insensitively.
+  LProjectInfo := ScanWithOverrides('.\$(DxComplyTest_Bin)', ['DXCOMPLYTEST_BIN', 'ide_bin']);
+  try
+    Assert.IsTrue(LProjectInfo.OutputDir.EndsWith('\ide_bin', True),
+      'OutputDir must use the IDE override but was: ' + LProjectInfo.OutputDir);
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_NestedIdeOverride_ExpandsBothLevels;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanWithOverrides('.\$(DxcOuter)',
+    ['DxcOuter', '$(DxcInner)\bin', 'DxcInner', 'root']);
+  try
+    Assert.IsTrue(LProjectInfo.OutputDir.EndsWith('\root\bin', True),
+      'OutputDir must expand the nested override but was: ' + LProjectInfo.OutputDir);
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_SelfReferencingOverride_Terminates;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanWithOverrides('.\$(DxcLoop)', ['DxcLoop', 'x\$(DxcLoop)']);
+  try
+    Assert.IsTrue(Pos('x\x\', LProjectInfo.OutputDir) > 0,
+      'OutputDir must contain the expanded levels but was: ' + LProjectInfo.OutputDir);
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_ProcessEnvAndIdeOverride_ProcessEnvWins;
+const
+  cName = 'DXCOMPLY_TEST_PRECEDENCE';
+var
+  LProjectInfo: TProjectInfo;
+begin
+  Winapi.Windows.SetEnvironmentVariable(PChar(cName), PChar('from_process'));
+  try
+    LProjectInfo := ScanWithOverrides('.\$(' + cName + ')', [cName, 'from_ide']);
+    try
+      Assert.IsTrue(LProjectInfo.OutputDir.EndsWith('\from_process', True),
+        'The process environment must win but OutputDir was: ' + LProjectInfo.OutputDir);
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    Winapi.Windows.SetEnvironmentVariable(PChar(cName), nil);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_UnknownVariable_WarningNamesIt;
+var
+  LCount: Integer;
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanWithOverrides('.\$(DxcMissingVar)', []);
+  try
+    LCount := 0;
+    for var LWarning in LProjectInfo.Warnings do
+    begin
+      if Pos('$(DxcMissingVar)', LWarning) > 0 then
+      begin
+        Inc(LCount);
+      end;
+    end;
+    Assert.AreEqual(1, LCount, 'Exactly one warning must name the missing variable');
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_SearchPathStartingWithVariable_ExpandsIt;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(
+    InheritanceDproj('<DCC_UnitSearchPath>$(DxcSearchRoot)\src</DCC_UnitSearchPath>', ''),
+    ['DxcSearchRoot', 'C:\DxcSearchRoot']);
+  try
+    Assert.IsTrue(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcSearchRoot\src'),
+      'The search path must hold the expanded entry but was: ' +
+      JoinEntries(LProjectInfo.ProjectSearchPaths));
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_SearchPathWithUnknownVariable_SkipsEntries;
+var
+  LEntry: string;
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(InheritanceDproj(
+    '<DCC_UnitSearchPath>$(DxcNoSuchVar)\src;C:\DxcBase\$(DxcNoSuchVar)\lib;' +
+    'C:\DxcKept</DCC_UnitSearchPath>', ''), []);
+  try
+    Assert.IsTrue(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcKept'),
+      'The resolvable entry must be kept but the search path was: ' +
+      JoinEntries(LProjectInfo.ProjectSearchPaths));
+
+    for LEntry in LProjectInfo.ProjectSearchPaths do
+    begin
+      Assert.IsTrue(Pos('$(', LEntry) = 0,
+        'No search path entry may keep an unresolved variable: ' + LEntry);
+    end;
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_PlatformSearchPath_KeepsInheritedEntries;
+var
+  LEntry: string;
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(InheritanceDproj(
+    '<DCC_UnitSearchPath>C:\DxcBaseDir;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>',
+    '<DCC_UnitSearchPath>C:\DxcWin32Dir;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>'), []);
+  try
+    Assert.IsTrue(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcWin32Dir'),
+      'The Win32 entry must be in the search path but it was: ' +
+      JoinEntries(LProjectInfo.ProjectSearchPaths));
+    Assert.IsTrue(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcBaseDir'),
+      'The inherited base entry must be in the search path but it was: ' +
+      JoinEntries(LProjectInfo.ProjectSearchPaths));
+
+    for LEntry in LProjectInfo.ProjectSearchPaths do
+    begin
+      Assert.IsTrue(Pos('$(', LEntry) = 0,
+        'No search path entry may keep a variable: ' + LEntry);
+    end;
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_PlatformNamespace_KeepsInheritedNames;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(InheritanceDproj(
+    '<DCC_Namespace>Xml;Data;$(DCC_Namespace)</DCC_Namespace>',
+    '<DCC_Namespace>Winapi;Vcl;$(DCC_Namespace)</DCC_Namespace>'), []);
+  try
+    Assert.IsTrue(HasEntry(LProjectInfo.UnitScopeNames, 'Vcl'),
+      'The Win32 scope names must be kept but were: ' +
+      JoinEntries(LProjectInfo.UnitScopeNames));
+    Assert.IsTrue(HasEntry(LProjectInfo.UnitScopeNames, 'Xml'),
+      'The inherited base scope names must be kept but were: ' +
+      JoinEntries(LProjectInfo.UnitScopeNames));
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_SearchPathVariableWithSeveralPaths_AddsEachPath;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(
+    InheritanceDproj('<DCC_UnitSearchPath>$(DxcMyLibs)</DCC_UnitSearchPath>', ''),
+    ['DxcMyLibs', 'C:\DxcLibA;C:\DxcLibB']);
+  try
+    Assert.IsTrue(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcLibA'),
+      'The first path of the variable must be an entry: ' + JoinEntries(LProjectInfo.ProjectSearchPaths));
+    Assert.IsTrue(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcLibB'),
+      'The second path of the variable must be an entry: ' + JoinEntries(LProjectInfo.ProjectSearchPaths));
+    for var LEntry in LProjectInfo.ProjectSearchPaths do
+    begin
+      Assert.IsTrue(Pos(';', LEntry) = 0, 'No entry may hold a separator: ' + LEntry);
+    end;
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_ThreeLevelSearchPathChain_KeepsAllLevels;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(ThreeLevelDproj(
+    '<DCC_UnitSearchPath>C:\DxcBaseDir;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>',
+    '<DCC_UnitSearchPath>C:\DxcWin32Dir;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>',
+    '<DCC_UnitSearchPath>C:\DxcCfgDir;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>'), []);
+  try
+    var LPaths := LProjectInfo.ProjectSearchPaths;
+    Assert.IsTrue(HasEntry(LPaths, 'C:\DxcCfgDir'), 'The Cfg_1_Win32 entry must be kept: ' + JoinEntries(LPaths));
+    Assert.IsTrue(HasEntry(LPaths, 'C:\DxcWin32Dir'), 'The Base_Win32 entry must be kept: ' + JoinEntries(LPaths));
+    Assert.IsTrue(HasEntry(LPaths, 'C:\DxcBaseDir'), 'The Base entry must be kept: ' + JoinEntries(LPaths));
+    Assert.IsTrue(LPaths.IndexOf('C:\DxcCfgDir') < LPaths.IndexOf('C:\DxcWin32Dir'),
+      'The most specific entry must come first: ' + JoinEntries(LPaths));
+    Assert.IsTrue(LPaths.IndexOf('C:\DxcWin32Dir') < LPaths.IndexOf('C:\DxcBaseDir'),
+      'The platform entry must come before the base entry: ' + JoinEntries(LPaths));
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_PlatformConfigGroup_IgnoresLongerPlatformName;
+var
+  LProjectInfo: TProjectInfo;
+  LDproj: string;
+begin
+  // Cfg_1_Win32Other stands for a sibling platform whose name starts with the
+  // scanned one, as Android64 does for Android and Win64x for Win64.
+  LDproj := StringReplace(
+    ThreeLevelDproj(
+      '<DCC_UnitSearchPath>C:\DxcBaseDir</DCC_UnitSearchPath>',
+      '<DCC_Define>DXCWIN32</DCC_Define>',
+      '<DCC_UnitSearchPath>C:\DxcCfgDir;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>'),
+    '  <ItemGroup>',
+    '  <PropertyGroup Condition="''$(Cfg_1_Win32Other)''!=''''">' + sLineBreak +
+    '    <DCC_UnitSearchPath>C:\DxcOtherPlatformDir;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <ItemGroup>', []);
+  LProjectInfo := ScanDprojWithOverrides(LDproj, []);
+  try
+    var LPaths := LProjectInfo.ProjectSearchPaths;
+    Assert.IsTrue(HasEntry(LPaths, 'C:\DxcCfgDir'),
+      'The Cfg_1_Win32 entry must be kept: ' + JoinEntries(LPaths));
+    Assert.IsFalse(HasEntry(LPaths, 'C:\DxcOtherPlatformDir'),
+      'The group of another platform must not be read: ' + JoinEntries(LPaths));
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_SelfReferenceWithoutPriorValue_IsEmpty;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(InheritanceDproj(
+    '<DCC_UnitSearchPath>C:\DxcOnlyDir;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>', ''), []);
+  try
+    // The project directory is always the first entry.
+    Assert.AreEqual(2, Integer(LProjectInfo.ProjectSearchPaths.Count),
+      'The self-reference must expand to nothing: ' + JoinEntries(LProjectInfo.ProjectSearchPaths));
+    Assert.IsTrue(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcOnlyDir'),
+      'The literal entry must be kept: ' + JoinEntries(LProjectInfo.ProjectSearchPaths));
+    for var LWarning in LProjectInfo.Warnings do
+    begin
+      Assert.IsTrue(Pos('$(DCC_UnitSearchPath)', LWarning) = 0,
+        'The self-reference must not be reported as unresolved: ' + LWarning);
+    end;
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_SelfReferenceWithoutPriorValue_UsesEnvironment;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(InheritanceDproj(
+    '<DCC_UnitSearchPath>C:\DxcOnlyDir;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>', ''),
+    ['DCC_UnitSearchPath', 'C:\DxcFromEnv']);
+  try
+    Assert.IsTrue(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcOnlyDir'),
+      'The literal entry must be kept: ' + JoinEntries(LProjectInfo.ProjectSearchPaths));
+    Assert.IsTrue(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcFromEnv'),
+      'The self-reference must take the variable of the same name: ' + JoinEntries(LProjectInfo.ProjectSearchPaths));
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_EmptyElementInLaterGroup_ClearsInheritedValue;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(InheritanceDproj(
+    '<DCC_UnitSearchPath>C:\DxcBaseDir</DCC_UnitSearchPath>',
+    '<DCC_UnitSearchPath></DCC_UnitSearchPath>'), []);
+  try
+    Assert.IsFalse(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcBaseDir'),
+      'The empty element must clear the base value: ' + JoinEntries(LProjectInfo.ProjectSearchPaths));
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_SelfClosingElementInLaterGroup_ClearsInheritedValue;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(ThreeLevelDproj(
+    '<DCC_UnitSearchPath>C:\DxcBaseDir</DCC_UnitSearchPath>',
+    '<DCC_UnitSearchPath/>',
+    '<DCC_UnitSearchPath>C:\DxcCfgDir;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>'), []);
+  try
+    Assert.IsTrue(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcCfgDir'),
+      'The Cfg_1_Win32 entry must be kept: ' + JoinEntries(LProjectInfo.ProjectSearchPaths));
+    Assert.IsFalse(HasEntry(LProjectInfo.ProjectSearchPaths, 'C:\DxcBaseDir'),
+      'The self-closing element must clear the base value: ' + JoinEntries(LProjectInfo.ProjectSearchPaths));
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_BdsVersionOption_IsUsedAndReported;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(InheritanceDproj('', ''), [], '99');
+  try
+    Assert.AreEqual('99.0', LProjectInfo.Toolchain.Version, 'The chosen BDS version must be used');
+    var LNotes := ProgressText(LProjectInfo);
+    Assert.IsTrue(Pos('Info: Delphi BDS version: 99.0 (set with --bds-version', LNotes) > 0,
+      'The chosen version and its source must be reported: ' + LNotes);
+    var LWarned := False;
+    for var LWarning in LProjectInfo.Warnings do
+    begin
+      if Pos('99.0 was requested but is not installed', LWarning) > 0 then
+      begin
+        LWarned := True;
+      end;
+    end;
+    Assert.IsTrue(LWarned, 'A version that is not installed must be reported');
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_WithoutBdsVersionOption_ReportsVersion;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := ScanDprojWithOverrides(InheritanceDproj('', ''), []);
+  try
+    var LNotes := ProgressText(LProjectInfo);
+    Assert.IsTrue(Pos('Info: Delphi BDS version: ', LNotes) > 0,
+      'The BDS version used must be reported: ' + LNotes);
+    Assert.IsTrue((Pos('BDS environment variable', LNotes) > 0) or (Pos('BDS is not set', LNotes) > 0),
+      'The report must say where the version came from: ' + LNotes);
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.NormalizeBdsVersion_AddsMinorVersion;
+begin
+  Assert.AreEqual('23.0', NormalizeBdsVersion('23'));
+  Assert.AreEqual('23.0', NormalizeBdsVersion(' 23.0 '));
+  Assert.AreEqual('', NormalizeBdsVersion(''));
+end;
+
+procedure TProjectScannerTests.Scan_EngineDproj_ResolvesPackageOutputFile;
+var
+  LProjectInfo: TProjectInfo;
+begin
+  LProjectInfo := FScanner.Scan(FEngineDprojPath, 'Win32', 'Debug');
+  try
+    Assert.IsTrue(LProjectInfo.OutputFilePath.EndsWith('DX.Comply.Engine370.bpl'),
+      'Package output must be ProjectName + DllSuffix + .bpl, but was: ' +
+      LProjectInfo.OutputFilePath);
+    Assert.IsTrue(Pos('Win32', LProjectInfo.ArtefactOutputDir) > 0,
+      'ArtefactOutputDir must contain the active platform');
+    Assert.IsTrue(Pos('Debug', LProjectInfo.ArtefactOutputDir) > 0,
+      'ArtefactOutputDir must contain the active configuration');
+  finally
+    LProjectInfo.Free;
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_LibraryDproj_AppendsDllSuffix;
+var
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+  LTempDproj: string;
+const
+  cDproj =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>Demo.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Library</AppType>' + sLineBreak +
+    '    <DllSuffix>_sfx</DllSuffix>' + sLineBreak +
+    '    <DCC_ExeOutput>.\out\$(Platform)\$(Config)</DCC_ExeOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+begin
+  LTempDir := TPath.Combine(TPath.GetTempPath, 'DXComplyTest_DllSuffix');
+  ForceDirectories(LTempDir);
+  LTempDproj := TPath.Combine(LTempDir, 'Demo.dproj');
+  try
+    TFile.WriteAllText(LTempDproj, cDproj, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LTempDproj, 'Win64', 'Debug');
+    try
+      Assert.IsTrue(LProjectInfo.OutputFilePath.EndsWith('Demo_sfx.dll'),
+        'Library output must append DllSuffix, but was: ' + LProjectInfo.OutputFilePath);
+      Assert.IsTrue(Pos('Win64', LProjectInfo.OutputFilePath) > 0,
+        'Library output path must contain the active platform');
+      Assert.IsTrue(Pos('Debug', LProjectInfo.OutputFilePath) > 0,
+        'Library output path must contain the active configuration');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TFile.Exists(LTempDproj) then
+      TFile.Delete(LTempDproj);
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_ApplicationDproj_IgnoresDllSuffix;
+var
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+  LTempDproj: string;
+  LWarning: string;
+const
+  cDproj =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>Demo.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '    <DllSuffix>$(Auto)</DllSuffix>' + sLineBreak +
+    '    <DCC_ExeOutput>.\bin</DCC_ExeOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+begin
+  LTempDir := TPath.Combine(TPath.GetTempPath, 'DXComplyTest_ExeName');
+  ForceDirectories(LTempDir);
+  LTempDproj := TPath.Combine(LTempDir, 'Demo.dproj');
+  try
+    TFile.WriteAllText(LTempDproj, cDproj, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LTempDproj, 'Win32', 'Release');
+    try
+      Assert.IsTrue(LProjectInfo.OutputFilePath.EndsWith('Demo.exe'),
+        'Application output must not append DllSuffix, but was: ' +
+        LProjectInfo.OutputFilePath);
+      Assert.IsTrue(Pos('$(Auto)', LProjectInfo.OutputFilePath) = 0,
+        'An unresolved suffix must not be written into an exe name');
+      for LWarning in LProjectInfo.Warnings do
+        Assert.IsTrue(Pos('DllSuffix', LWarning) = 0,
+          'An application must not warn about DllSuffix: ' + LWarning);
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TFile.Exists(LTempDproj) then
+      TFile.Delete(LTempDproj);
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_PackageDproj_UsesBplOutputDir;
+var
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+  LTempDproj: string;
+const
+  cDproj =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>Demo.dpk</MainSource>' + sLineBreak +
+    '    <AppType>Package</AppType>' + sLineBreak +
+    '    <DllSuffix>290</DllSuffix>' + sLineBreak +
+    '    <DCC_ExeOutput>.\bin</DCC_ExeOutput>' + sLineBreak +
+    '    <DCC_BplOutput>.\bpl\$(Platform)\$(Config)</DCC_BplOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+begin
+  LTempDir := TPath.Combine(TPath.GetTempPath, 'DXComplyTest_BplDir');
+  ForceDirectories(LTempDir);
+  LTempDproj := TPath.Combine(LTempDir, 'Demo.dproj');
+  try
+    TFile.WriteAllText(LTempDproj, cDproj, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LTempDproj, 'Win32', 'Release');
+    try
+      Assert.IsTrue(Pos('\bpl\', LowerCase(LProjectInfo.OutputFilePath)) > 0,
+        'Package output must live under the BPL directory, but was: ' +
+        LProjectInfo.OutputFilePath);
+      Assert.IsTrue(LProjectInfo.OutputFilePath.EndsWith('Demo290.bpl'),
+        'Package output must include DllSuffix');
+      Assert.IsTrue(LowerCase(LProjectInfo.OutputDir).EndsWith('\bin'),
+        'OutputDir still prefers DCC_ExeOutput, but was: ' + LProjectInfo.OutputDir);
+      Assert.IsTrue(Pos('\bpl\', LowerCase(LProjectInfo.ArtefactOutputDir)) > 0,
+        'ArtefactOutputDir must be the BPL directory');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TFile.Exists(LTempDproj) then
+      TFile.Delete(LTempDproj);
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_LibrarySource_DetectedWithoutAppType;
+var
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+  LTempDproj: string;
+begin
+  LTempDir := TPath.Combine(TPath.GetTempPath, 'DXComplyTest_LibSource');
+  ForceDirectories(LTempDir);
+  LTempDproj := TPath.Combine(LTempDir, 'Demo.dproj');
+  try
+    TFile.WriteAllText(TPath.Combine(LTempDir, 'Demo.dpr'),
+      'library Demo;' + sLineBreak + 'begin' + sLineBreak + 'end.' + sLineBreak,
+      TEncoding.UTF8);
+    TFile.WriteAllText(LTempDproj,
+      '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+      '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+      '  <PropertyGroup>' + sLineBreak +
+      '    <MainSource>Demo.dpr</MainSource>' + sLineBreak +
+      '    <DCC_ExeOutput>.\bin</DCC_ExeOutput>' + sLineBreak +
+      '  </PropertyGroup>' + sLineBreak +
+      '</Project>', TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LTempDproj, 'Win32', 'Release');
+    try
+      Assert.IsTrue(LProjectInfo.OutputFilePath.EndsWith('Demo.dll'),
+        'A library source file must produce a .dll when AppType is absent, but was: ' +
+        LProjectInfo.OutputFilePath);
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_UnresolvedDllSuffix_LeavesOutputFileEmpty;
+var
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+  LTempDproj: string;
+  LWarning: string;
+  LSawSuffixWarning: Boolean;
+begin
+  LTempDir := TPath.Combine(TPath.GetTempPath, 'DXComplyTest_AutoSuffix');
+  ForceDirectories(LTempDir);
+  LTempDproj := TPath.Combine(LTempDir, 'Demo.dproj');
+  try
+    TFile.WriteAllText(LTempDproj,
+      '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+      '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+      '  <PropertyGroup>' + sLineBreak +
+      '    <MainSource>Demo.dpk</MainSource>' + sLineBreak +
+      '    <AppType>Package</AppType>' + sLineBreak +
+      '    <DllSuffix>$(Auto)</DllSuffix>' + sLineBreak +
+      '    <DCC_BplOutput>.\bpl</DCC_BplOutput>' + sLineBreak +
+      '  </PropertyGroup>' + sLineBreak +
+      '</Project>', TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LTempDproj, 'Win32', 'Release');
+    try
+      Assert.AreEqual('', LProjectInfo.OutputFilePath,
+        'An unresolved $(Auto) suffix must not invent an output file name');
+      Assert.IsTrue(Pos('bpl', LowerCase(LProjectInfo.ArtefactOutputDir)) > 0,
+        'The BPL directory must still be the directory that is scanned');
+      LSawSuffixWarning := False;
+      for LWarning in LProjectInfo.Warnings do
+        if Pos('DllSuffix', LWarning) > 0 then
+          LSawSuffixWarning := True;
+      Assert.IsTrue(LSawSuffixWarning,
+        'An unresolved DllSuffix must be reported');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+function MakeTempDir: string;
+var
+  LGuid: TGUID;
+begin
+  CreateGUID(LGuid);
+  Result := TPath.Combine(TPath.GetTempPath,
+    'dxc-' + GUIDToString(LGuid).Trim(['{', '}']));
+  ForceDirectories(Result);
+end;
+
+procedure PushBds(const AVersionDir: string; out APrevious: string);
+begin
+  APrevious := System.SysUtils.GetEnvironmentVariable('BDS');
+  ForceDirectories(AVersionDir);
+  Winapi.Windows.SetEnvironmentVariable(PChar('BDS'), PChar(AVersionDir));
+end;
+
+procedure PopBds(const APrevious: string);
+begin
+  if APrevious = '' then
+    Winapi.Windows.SetEnvironmentVariable(PChar('BDS'), nil)
+  else
+    Winapi.Windows.SetEnvironmentVariable(PChar('BDS'), PChar(APrevious));
+end;
+
+procedure WriteU16(var ABytes: TBytes; AOffset: Integer; AValue: Word);
+begin
+  ABytes[AOffset] := Byte(AValue and $00FF);
+  ABytes[AOffset + 1] := Byte(AValue shr 8);
+end;
+
+procedure WriteU32(var ABytes: TBytes; AOffset: Integer; AValue: Cardinal);
+begin
+  ABytes[AOffset] := Byte(AValue and $FF);
+  ABytes[AOffset + 1] := Byte((AValue shr 8) and $FF);
+  ABytes[AOffset + 2] := Byte((AValue shr 16) and $FF);
+  ABytes[AOffset + 3] := Byte((AValue shr 24) and $FF);
+end;
+
+procedure WriteAsciiZ(var ABytes: TBytes; AOffset: Integer; const AText: string);
+var
+  I: Integer;
+begin
+  for I := 1 to Length(AText) do
+    ABytes[AOffset + I - 1] := Byte(Ord(AText[I]));
+  ABytes[AOffset + Length(AText)] := 0;
+end;
+
+// Minimal PE image: DOS stub, one section at RVA $1000 / file $200, and an
+// import directory whose DLL names sit just after the descriptor table.
+function BuildImportPe(APe32Plus: Boolean; const ADllNames: array of string): TBytes;
+const
+  cFileSize = $400;
+  cSectionVa = $1000;
+  cSectionRaw = $200;
+var
+  LDataOffset: Integer;
+  LDescAt: Integer;
+  LFilePos: Integer;
+  LImportSize: Integer;
+  LMachine: Word;
+  LMagic: Word;
+  LNameRva: Integer;
+  LNumberOffset: Integer;
+  LOptSize: Integer;
+  LSectionAt: Integer;
+  I: Integer;
+begin
+  SetLength(Result, cFileSize);
+  if APe32Plus then
+  begin
+    LMachine := $8664;
+    LOptSize := 240;
+    LMagic := $020B;
+    LNumberOffset := 108;
+    LDataOffset := 112;
+  end
+  else
+  begin
+    LMachine := $014C;
+    LOptSize := 224;
+    LMagic := $010B;
+    LNumberOffset := 92;
+    LDataOffset := 96;
+  end;
+
+  WriteU16(Result, 0, $5A4D);
+  WriteU32(Result, $3C, $80);
+  WriteU32(Result, $80, $4550);
+  WriteU16(Result, $84, LMachine);
+  WriteU16(Result, $86, 1);
+  WriteU16(Result, $94, Word(LOptSize));
+  WriteU16(Result, $98, LMagic);
+  WriteU32(Result, $98 + LNumberOffset, 16);
+  LImportSize := 20 * (Length(ADllNames) + 1);
+  WriteU32(Result, $98 + LDataOffset + 8, cSectionVa);
+  WriteU32(Result, $98 + LDataOffset + 12, Cardinal(LImportSize));
+
+  LSectionAt := $98 + LOptSize;
+  WriteU32(Result, LSectionAt + 8, $200);
+  WriteU32(Result, LSectionAt + 12, cSectionVa);
+  WriteU32(Result, LSectionAt + 16, $200);
+  WriteU32(Result, LSectionAt + 20, cSectionRaw);
+
+  LNameRva := cSectionVa + LImportSize;
+  LFilePos := cSectionRaw + LImportSize;
+  for I := 0 to High(ADllNames) do
+  begin
+    LDescAt := cSectionRaw + (I * 20);
+    WriteU32(Result, LDescAt, $2000);
+    WriteU32(Result, LDescAt + 12, Cardinal(LNameRva));
+    WriteU32(Result, LDescAt + 16, $2100);
+    if LFilePos + Length(ADllNames[I]) >= cFileSize then
+      raise Exception.Create('Synthetic PE import name does not fit');
+    WriteAsciiZ(Result, LFilePos, ADllNames[I]);
+    Inc(LNameRva, Length(ADllNames[I]) + 1);
+    Inc(LFilePos, Length(ADllNames[I]) + 1);
+  end;
+end;
+
+function ProductVersionDproj: string;
+begin
+  Result :=
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>DecApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Console</AppType>' + sLineBreak +
+    '    <TargetedPlatforms>1</TargetedPlatforms>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+    '    <DCC_ExeOutput>.\Compiled\BIN_IDE$(ProductVersion)_$(Platform)_$(Config)</DCC_ExeOutput>' + sLineBreak +
+    '    <DCC_DcuOutput>.\Compiled\DCU_IDE$(BDSVersion)_$(Platform)_$(Config)</DCC_DcuOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>' + sLineBreak;
+end;
+
+procedure TProjectScannerTests.Scan_ProductVersion_UsesEmptyDirWhenThatIsTheOnlyOne;
+var
+  LNotes: string;
+  LPreviousBds: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  LPreviousBds := '';
+  try
+    PushBds(TPath.Combine(LTempDir, 'Studio', '37.0'), LPreviousBds);
+    ForceDirectories(TPath.Combine(LTempDir, 'Compiled', 'BIN_IDE_Win32_Release'));
+    ForceDirectories(TPath.Combine(LTempDir, 'Compiled', 'DCU_IDE_Win32_Release'));
+    TFile.WriteAllText(TPath.Combine(LTempDir, 'DecApp.dproj'),
+      ProductVersionDproj, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(TPath.Combine(LTempDir, 'DecApp.dproj'),
+      'Win32', 'Release');
+    try
+      Assert.IsTrue(LProjectInfo.OutputDir.EndsWith('\Compiled\BIN_IDE_Win32_Release'),
+        'The directory with an empty ProductVersion must be used, but was: ' +
+        LProjectInfo.OutputDir);
+      Assert.IsTrue(Pos('$(', LProjectInfo.OutputDir) = 0,
+        'The resolved output path must contain no $( token: ' + LProjectInfo.OutputDir);
+      Assert.IsTrue(Pos('37.0', LProjectInfo.OutputDir) = 0,
+        'The empty ProductVersion directory was expected: ' + LProjectInfo.OutputDir);
+      Assert.IsTrue(LProjectInfo.DcuOutputDir.EndsWith('\Compiled\DCU_IDE_Win32_Release'),
+        '$(BDSVersion) must follow the empty-token directory, but was: ' +
+        LProjectInfo.DcuOutputDir);
+      Assert.IsTrue(Pos('$(', LProjectInfo.DcuOutputDir) = 0,
+        'The resolved DCU path must contain no $( token: ' + LProjectInfo.DcuOutputDir);
+      LNotes := ProgressText(LProjectInfo);
+      Assert.IsTrue(Pos('DCC_ExeOutput', LNotes) > 0,
+        'Verbose progress must name the output directory: ' + LNotes);
+      Assert.IsTrue(Pos('left empty', LNotes) > 0,
+        'Verbose progress must say the empty ProductVersion directory was used: ' +
+        LNotes);
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    PopBds(LPreviousBds);
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_ProductVersion_UsesExpandedDirWhenItExists;
+var
+  LNotes: string;
+  LPreviousBds: string;
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  LPreviousBds := '';
+  try
+    PushBds(TPath.Combine(LTempDir, 'Studio', '37.0'), LPreviousBds);
+    ForceDirectories(TPath.Combine(LTempDir, 'Compiled', 'BIN_IDE37.0_Win32_Release'));
+    ForceDirectories(TPath.Combine(LTempDir, 'Compiled', 'BIN_IDE_Win32_Release'));
+    ForceDirectories(TPath.Combine(LTempDir, 'Compiled', 'DCU_IDE37.0_Win32_Release'));
+    TFile.WriteAllText(TPath.Combine(LTempDir, 'DecApp.dproj'),
+      ProductVersionDproj, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(TPath.Combine(LTempDir, 'DecApp.dproj'),
+      'Win32', 'Release');
+    try
+      Assert.IsTrue(
+        LProjectInfo.OutputDir.EndsWith('\Compiled\BIN_IDE37.0_Win32_Release'),
+        'The directory with the BDS version must win, but was: ' +
+        LProjectInfo.OutputDir);
+      Assert.IsTrue(Pos('$(', LProjectInfo.OutputDir) = 0,
+        'The resolved output path must contain no $( token: ' + LProjectInfo.OutputDir);
+      Assert.IsTrue(
+        LProjectInfo.DcuOutputDir.EndsWith('\Compiled\DCU_IDE37.0_Win32_Release'),
+        '$(BDSVersion) must expand to the detected BDS version, but was: ' +
+        LProjectInfo.DcuOutputDir);
+      Assert.IsTrue(Pos('$(', LProjectInfo.DcuOutputDir) = 0,
+        'The resolved DCU path must contain no $( token: ' + LProjectInfo.DcuOutputDir);
+      LNotes := ProgressText(LProjectInfo);
+      Assert.IsTrue(Pos('expanded properties; the directory exists', LNotes) > 0,
+        'Verbose progress must say the expanded directory was used: ' + LNotes);
+      Assert.IsTrue(Pos('left empty', LNotes) = 0,
+        'The empty ProductVersion directory must not be chosen when the expanded one exists: ' +
+        LNotes);
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    PopBds(LPreviousBds);
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_UsePackagesMissing_ReturnsNoRuntimePackages;
+var
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    TFile.WriteAllText(TPath.Combine(LTempDir, 'PkgApp.dproj'),
+      '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+      '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+      '  <PropertyGroup>' + sLineBreak +
+      '    <MainSource>PkgApp.dpr</MainSource>' + sLineBreak +
+      '    <AppType>Console</AppType>' + sLineBreak +
+      '    <TargetedPlatforms>1</TargetedPlatforms>' + sLineBreak +
+      '  </PropertyGroup>' + sLineBreak +
+      '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+      '    <DCC_UsePackage>rtl;vcl;fmx</DCC_UsePackage>' + sLineBreak +
+      '  </PropertyGroup>' + sLineBreak +
+      '</Project>' + sLineBreak, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(TPath.Combine(LTempDir, 'PkgApp.dproj'),
+      'Win32', 'Release');
+    try
+      Assert.IsNotNull(LProjectInfo.RuntimePackages);
+      Assert.AreEqual(NativeInt(0), NativeInt(LProjectInfo.RuntimePackages.Count),
+        'DCC_UsePackage without UsePackages must not be linked');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_UsePackagesTrueInBase_ReturnsPackages;
+var
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    TFile.WriteAllText(TPath.Combine(LTempDir, 'PkgApp.dproj'),
+      '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+      '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+      '  <PropertyGroup>' + sLineBreak +
+      '    <MainSource>PkgApp.dpr</MainSource>' + sLineBreak +
+      '    <AppType>Console</AppType>' + sLineBreak +
+      '    <TargetedPlatforms>1</TargetedPlatforms>' + sLineBreak +
+      '  </PropertyGroup>' + sLineBreak +
+      '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+      '    <UsePackages>true</UsePackages>' + sLineBreak +
+      '    <DCC_UsePackage>rtl;vcl</DCC_UsePackage>' + sLineBreak +
+      '  </PropertyGroup>' + sLineBreak +
+      '</Project>' + sLineBreak, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(TPath.Combine(LTempDir, 'PkgApp.dproj'),
+      'Win32', 'Release');
+    try
+      Assert.AreEqual(NativeInt(2), NativeInt(LProjectInfo.RuntimePackages.Count),
+        'UsePackages true in Base must return the declared packages');
+      Assert.IsTrue(LProjectInfo.RuntimePackages.Contains('rtl'));
+      Assert.IsTrue(LProjectInfo.RuntimePackages.Contains('vcl'));
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_UsePackagesTrueInOtherConfig_ReturnsNone;
+var
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+  LDproj: string;
+const
+  cXml =
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>PkgApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Console</AppType>' + sLineBreak +
+    '    <TargetedPlatforms>1</TargetedPlatforms>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+    '    <DCC_UsePackage>rtl;vcl</DCC_UsePackage>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Cfg_1)''!=''''">' + sLineBreak +
+    '    <UsePackages>true</UsePackages>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <ItemGroup>' + sLineBreak +
+    '    <BuildConfiguration Include="Debug">' + sLineBreak +
+    '      <Key>Cfg_1</Key>' + sLineBreak +
+    '    </BuildConfiguration>' + sLineBreak +
+    '    <BuildConfiguration Include="Release">' + sLineBreak +
+    '      <Key>Cfg_2</Key>' + sLineBreak +
+    '    </BuildConfiguration>' + sLineBreak +
+    '  </ItemGroup>' + sLineBreak +
+    '</Project>' + sLineBreak;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LDproj := TPath.Combine(LTempDir, 'PkgApp.dproj');
+    TFile.WriteAllText(LDproj, cXml, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(LDproj, 'Win32', 'Release');
+    try
+      Assert.AreEqual(NativeInt(0), NativeInt(LProjectInfo.RuntimePackages.Count),
+        'UsePackages true only in Debug must not apply to Release');
+    finally
+      LProjectInfo.Free;
+    end;
+
+    LProjectInfo := LScanner.Scan(LDproj, 'Win32', 'Debug');
+    try
+      Assert.AreEqual(NativeInt(2), NativeInt(LProjectInfo.RuntimePackages.Count),
+        'UsePackages true in the Debug config must return the declared packages');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+function UsePackagesDproj: string;
+begin
+  Result :=
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>PeApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '    <TargetedPlatforms>1</TargetedPlatforms>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+    '    <DCC_ExeOutput>.\out</DCC_ExeOutput>' + sLineBreak +
+    '    <UsePackages>true</UsePackages>' + sLineBreak +
+    '    <DCC_UsePackage>rtl;vcl;vclimg;LockBox</DCC_UsePackage>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>' + sLineBreak;
+end;
+
+procedure TProjectScannerTests.Scan_UsePackages_PeImports_KeepsOnlyImportedPackages;
+var
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    ForceDirectories(TPath.Combine(LTempDir, 'out'));
+    TFile.WriteAllBytes(TPath.Combine(LTempDir, 'out', 'PeApp.exe'),
+      BuildImportPe(False, ['rtl370.bpl', 'vclimg370.bpl', 'LockBox.bpl',
+        'kernel32.dll']));
+    TFile.WriteAllText(TPath.Combine(LTempDir, 'PeApp.dproj'),
+      UsePackagesDproj, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(TPath.Combine(LTempDir, 'PeApp.dproj'),
+      'Win32', 'Release');
+    try
+      Assert.IsTrue(TFile.Exists(LProjectInfo.OutputFilePath),
+        'The synthetic exe must be the resolved output file: ' +
+        LProjectInfo.OutputFilePath);
+      Assert.AreEqual(NativeInt(3), NativeInt(LProjectInfo.RuntimePackages.Count),
+        'Only BPLs named in the import directory are kept');
+      Assert.IsTrue(LProjectInfo.RuntimePackages.Contains('rtl'),
+        'rtl370.bpl must keep the rtl package');
+      Assert.IsTrue(LProjectInfo.RuntimePackages.Contains('vclimg'),
+        'vclimg370.bpl must keep the vclimg package');
+      Assert.IsTrue(LProjectInfo.RuntimePackages.Contains('LockBox'),
+        'LockBox.bpl must keep the package with no version suffix');
+      Assert.IsFalse(LProjectInfo.RuntimePackages.Contains('vcl'),
+        'vcl must not match vclimg370.bpl');
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.Scan_UsePackages_UnreadablePe_KeepsDeclaredPackages;
+var
+  LProjectInfo: TProjectInfo;
+  LScanner: IProjectScanner;
+  LTempDir: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    ForceDirectories(TPath.Combine(LTempDir, 'out'));
+    TFile.WriteAllBytes(TPath.Combine(LTempDir, 'out', 'PeApp.exe'),
+      TBytes.Create($4D, $5A, $00));
+    TFile.WriteAllText(TPath.Combine(LTempDir, 'PeApp.dproj'),
+      UsePackagesDproj, TEncoding.UTF8);
+    LScanner := TProjectScanner.Create;
+    LProjectInfo := LScanner.Scan(TPath.Combine(LTempDir, 'PeApp.dproj'),
+      'Win32', 'Release');
+    try
+      Assert.AreEqual(NativeInt(4), NativeInt(LProjectInfo.RuntimePackages.Count),
+        'A file that is not a valid PE must keep the UsePackages list');
+      Assert.IsTrue(LProjectInfo.RuntimePackages.Contains('rtl'));
+      Assert.IsTrue(LProjectInfo.RuntimePackages.Contains('vcl'));
+      Assert.IsTrue(LProjectInfo.RuntimePackages.Contains('vclimg'));
+      Assert.IsTrue(LProjectInfo.RuntimePackages.Contains('LockBox'));
+    finally
+      LProjectInfo.Free;
+    end;
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.TryReadPeImportNames_SyntheticPe32_ReadsDllName;
+var
+  LNames: TArray<string>;
+  LTempDir: string;
+  LFile: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LFile := TPath.Combine(LTempDir, 'sample.exe');
+    TFile.WriteAllBytes(LFile, BuildImportPe(False, ['rtl370.bpl', 'kernel32.dll']));
+    Assert.IsTrue(TryReadPeImportNames(LFile, LNames),
+      'A minimal PE32 image must be readable');
+    Assert.AreEqual(NativeInt(2), NativeInt(Length(LNames)));
+    Assert.AreEqual('rtl370.bpl', LNames[0]);
+    Assert.AreEqual('kernel32.dll', LNames[1]);
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.TryReadPeImportNames_SyntheticPe32Plus_ReadsDllName;
+var
+  LNames: TArray<string>;
+  LTempDir: string;
+  LFile: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LFile := TPath.Combine(LTempDir, 'sample.exe');
+    TFile.WriteAllBytes(LFile, BuildImportPe(True, ['vcl290.bpl']));
+    Assert.IsTrue(TryReadPeImportNames(LFile, LNames),
+      'A minimal PE32+ image must be readable');
+    Assert.AreEqual(NativeInt(1), NativeInt(Length(LNames)));
+    Assert.AreEqual('vcl290.bpl', LNames[0]);
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.TryReadPeImportNames_Malformed_ReturnsFalse;
+var
+  LNames: TArray<string>;
+  LTempDir: string;
+  LFile: string;
+begin
+  LTempDir := MakeTempDir;
+  try
+    LFile := TPath.Combine(LTempDir, 'short.exe');
+    TFile.WriteAllBytes(LFile, TBytes.Create($4D, $5A));
+    Assert.IsFalse(TryReadPeImportNames(LFile, LNames),
+      'A truncated MZ file must be a failed read');
+    Assert.AreEqual(NativeInt(0), NativeInt(Length(LNames)));
+  finally
+    if TDirectory.Exists(LTempDir) then
+      TDirectory.Delete(LTempDir, True);
+  end;
+end;
+
+procedure TProjectScannerTests.TryReadPeImportNames_TestExecutable_HasNoBplImports;
+var
+  LName: string;
+  LNames: TArray<string>;
+begin
+  Assert.IsTrue(TryReadPeImportNames(ParamStr(0), LNames),
+    'The running test executable must be a readable PE');
+  for LName in LNames do
+    Assert.IsFalse(SameText(TPath.GetExtension(LName), '.bpl'),
+      'The test executable imports a BPL: ' + LName);
 end;
 
 initialization

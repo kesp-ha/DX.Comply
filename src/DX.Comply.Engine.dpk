@@ -37,12 +37,16 @@ requires
 
 contains
   DX.Comply.Engine.Intf in 'DX.Comply.Engine.Intf.pas',
+  DX.Comply.VersionInfo in 'DX.Comply.VersionInfo.pas',
   DX.Comply.BuildEvidence.Intf in 'DX.Comply.BuildEvidence.Intf.pas',
   DX.Comply.BuildOrchestrator in 'DX.Comply.BuildOrchestrator.pas',
   DX.Comply.BuildEvidence.Reader in 'DX.Comply.BuildEvidence.Reader.pas',
   DX.Comply.MapFile.Reader in 'DX.Comply.MapFile.Reader.pas',
+  DX.Comply.MapFile.LldReader in 'DX.Comply.MapFile.LldReader.pas',
   DX.Comply.UsesClauseParser in 'DX.Comply.UsesClauseParser.pas',
+  DX.Comply.DependencyGraph in 'DX.Comply.DependencyGraph.pas',
   DX.Comply.UnitResolver in 'DX.Comply.UnitResolver.pas',
+  DX.Comply.LegacyProject in 'DX.Comply.LegacyProject.pas',
   DX.Comply.ProjectScanner in 'DX.Comply.ProjectScanner.pas',
   DX.Comply.FileScanner in 'DX.Comply.FileScanner.pas',
   DX.Comply.HashService in 'DX.Comply.HashService.pas',
@@ -50,10 +54,16 @@ contains
   DX.Comply.CycloneDx.XmlWriter in 'DX.Comply.CycloneDx.XmlWriter.pas',
   DX.Comply.Report.Intf in 'DX.Comply.Report.Intf.pas',
   DX.Comply.Report.Support in 'DX.Comply.Report.Support.pas',
+  DX.Comply.Report.Overview in 'DX.Comply.Report.Overview.pas',
   DX.Comply.Report.MarkdownWriter in 'DX.Comply.Report.MarkdownWriter.pas',
   DX.Comply.Report.HtmlWriter in 'DX.Comply.Report.HtmlWriter.pas',
   DX.Comply.Spdx.Writer in 'DX.Comply.Spdx.Writer.pas',
+  DX.Comply.Spdx3.Writer in 'DX.Comply.Spdx3.Writer.pas',
   DX.Comply.Schema.Validator in 'DX.Comply.Schema.Validator.pas',
-  DX.Comply.Engine in 'DX.Comply.Engine.pas';
+  DX.Comply.ComponentManifest in 'DX.Comply.ComponentManifest.pas',
+  DX.Comply.CraChecks in 'DX.Comply.CraChecks.pas',
+  DX.Comply.LibrarySource in 'DX.Comply.LibrarySource.pas',
+  DX.Comply.Engine in 'DX.Comply.Engine.pas',
+  DX.Comply.SbomHeaderConfig in 'DX.Comply.SbomHeaderConfig.pas';
 
 end.

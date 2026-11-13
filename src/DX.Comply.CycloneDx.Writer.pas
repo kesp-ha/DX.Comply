@@ -1,16 +1,17 @@
 ﻿/// <summary>
 /// DX.Comply.CycloneDx.Writer
-/// Generates CycloneDX 1.5 SBOM documents in JSON format.
+/// Generates CycloneDX 1.6 SBOM documents in JSON format.
 /// </summary>
 ///
 /// <remarks>
-/// This unit provides TCycloneDxJsonWriter which generates CycloneDX 1.5 JSON SBOMs:
+/// This unit provides TCycloneDxJsonWriter which generates CycloneDX 1.6 JSON SBOMs:
 /// - Full metadata section with tool information
-/// - Component list with hashes (SHA-256)
-/// - Basic dependency graph
+/// - Component list with hashes (SHA-256 and SHA-512 when the file could be opened)
+/// - Dependency graph grouped by deliverable, runtime packages, external DLLs and units no other unit uses
+/// - Direct uses edges between units whose Pascal source was read
 /// - Schema validation support
 ///
-/// CycloneDX 1.5 specification: https://cyclonedx.org/specification/overview/
+/// CycloneDX 1.6 specification: https://cyclonedx.org/specification/overview/
 /// </remarks>
 ///
 /// <copyright>
@@ -39,17 +40,24 @@ type
   private
     const
       /// <summary>CycloneDX specification version.</summary>
-      cSpecVersion = '1.5';
+      cSpecVersion = '1.6';
       /// <summary>Tool name.</summary>
       cToolName = 'DX.Comply';
-      /// <summary>Tool version.</summary>
-      cToolVersion = '1.0.0';
   private
     function GenerateUuid: string;
     function BuildMetadata(const AMetadata: TSbomMetadata; const AProjectInfo: TProjectInfo): TJSONObject;
     function BuildProperties(const AProperties: TArray<TSbomProperty>): TJSONArray;
-    function BuildComponent(const AArtefact: TArtefactInfo; const AIndex: Integer): TJSONObject;
-    function BuildDependencies(const AArtefacts: TArtefactList; const AProjectBomRef: string): TJSONArray;
+    /// <summary>
+    /// Builds one component. ALicence is written as licenses when it is not
+    /// empty. The built program and own-code units use the product licence.
+    /// An Embarcadero unit uses its origin label. AVersion is the version
+    /// to write. The built program uses the product version when it has
+    /// none of its own.
+    /// </summary>
+    function BuildComponent(const AArtefact: TArtefactInfo; const AIndex: Integer;
+      AUnresolvedSource: Boolean; const ALicence, AVersion: string): TJSONObject;
+    function BuildDependencies(const AArtefacts: TArtefactList;
+      const AProjectBomRef, AOutputFilePath: string): TJSONArray;
   public
     // ISbomWriter
     function Write(const AOutputPath: string;
@@ -61,6 +69,11 @@ type
   end;
 
 implementation
+
+uses
+  DX.Comply.ComponentManifest,
+  DX.Comply.DependencyGraph,
+  DX.Comply.VersionInfo;
 
 { TCycloneDxJsonWriter }
 
@@ -96,22 +109,20 @@ end;
 function TCycloneDxJsonWriter.BuildMetadata(const AMetadata: TSbomMetadata;
   const AProjectInfo: TProjectInfo): TJSONObject;
 var
-  LMetadata, LComponent, LTool, LTools, LSupplier: TJSONObject;
-  LToolArray: TJSONArray;
+  LMetadata, LComponent, LTool, LTools, LSupplier, LManufacture, LContact: TJSONObject;
+  LToolArray, LSupplierUrls, LContacts: TJSONArray;
+  LKind: string;
 begin
   LMetadata := TJSONObject.Create;
 
-  // Timestamp
-  if AMetadata.Timestamp <> '' then
-    LMetadata.AddPair('timestamp', AMetadata.Timestamp)
-  else
-    LMetadata.AddPair('timestamp', DateToISO8601(Now, False));
+  // Timestamp in UTC with a Z suffix (BSI TR-03183-2 section 5.2.1).
+  LMetadata.AddPair('timestamp', FormatUtcTimestamp(AMetadata.Timestamp));
 
   // Component (the project being documented).
   // Prefer metadata overrides (CLI --product / --version) over values parsed
   // from the .dproj — issue #26.
   LComponent := TJSONObject.Create;
-  LComponent.AddPair('type', 'application');
+  LComponent.AddPair('type', SbomRootComponentType(AMetadata));
   if AMetadata.ProductName <> '' then
     LComponent.AddPair('name', AMetadata.ProductName)
   else
@@ -126,23 +137,69 @@ begin
   begin
     LSupplier := TJSONObject.Create;
     LSupplier.AddPair('name', AMetadata.Supplier);
+    if AMetadata.SupplierUrl <> '' then
+    begin
+      LSupplierUrls := TJSONArray.Create;
+      LSupplier.AddPair('url', LSupplierUrls);
+      LSupplierUrls.Add(AMetadata.SupplierUrl);
+    end;
+    if IsBsiEmailAddress(Trim(AMetadata.Supplier)) then
+    begin
+      LContacts := TJSONArray.Create;
+      LContact := TJSONObject.Create;
+      LContact.AddPair('email', Trim(AMetadata.Supplier));
+      LContacts.Add(LContact);
+      LSupplier.AddPair('contact', LContacts);
+    end;
     LComponent.AddPair('supplier', LSupplier);
   end;
+
+  // Same classification as a manifest library. Empty writes nothing.
+  // licences sit before purl and properties, matching the component sequence.
+  AddCycloneDxLicences(LComponent, AMetadata.Licence, '');
+
+  if Trim(AMetadata.Purl) <> '' then
+    LComponent.AddPair('purl', Trim(AMetadata.Purl));
 
   if Length(AMetadata.ComponentProperties) > 0 then
     LComponent.AddPair('properties', BuildProperties(AMetadata.ComponentProperties));
 
   LMetadata.AddPair('component', LComponent);
 
+  // CycloneDX 1.6 names the SBOM creator metadata.manufacturer. It is one
+  // organizational entity, not an array. The contact is written only when
+  // the caller supplied an email or an http(s) URL. The deprecated
+  // manufacture element is not written.
+  LKind := BsiCreatorKind(AMetadata.SbomCreator);
+  if LKind <> '' then
+  begin
+    LManufacture := TJSONObject.Create;
+    if LKind = 'email' then
+    begin
+      LContacts := TJSONArray.Create;
+      LContact := TJSONObject.Create;
+      LContact.AddPair('email', Trim(AMetadata.SbomCreator));
+      LContacts.Add(LContact);
+      LManufacture.AddPair('contact', LContacts);
+    end
+    else
+    begin
+      LSupplierUrls := TJSONArray.Create;
+      LSupplierUrls.Add(Trim(AMetadata.SbomCreator));
+      LManufacture.AddPair('url', LSupplierUrls);
+    end;
+    LMetadata.AddPair('manufacturer', LManufacture);
+  end;
+
   if Length(AMetadata.Properties) > 0 then
     LMetadata.AddPair('properties', BuildProperties(AMetadata.Properties));
 
-  // Tool information (CycloneDX 1.5 tools.components format)
+  // Tool information (CycloneDX 1.6 tools.components format)
   LTool := TJSONObject.Create;
   LTool.AddPair('type', 'application');
   LTool.AddPair('author', 'Olaf Monien');
   LTool.AddPair('name', cToolName);
-  LTool.AddPair('version', cToolVersion);
+  LTool.AddPair('version', ResolveDxComplyToolVersion(AMetadata.ToolVersion));
 
   LToolArray := TJSONArray.Create;
   LToolArray.Add(LTool);
@@ -155,50 +212,108 @@ begin
 end;
 
 function TCycloneDxJsonWriter.BuildComponent(const AArtefact: TArtefactInfo;
-  const AIndex: Integer): TJSONObject;
+  const AIndex: Integer; AUnresolvedSource: Boolean;
+  const ALicence, AVersion: string): TJSONObject;
 var
-  LComponent, LHashes: TJSONObject;
-  LHashArray, LProperties: TJSONArray;
+  LComponent, LHashes, LRef, LRefHash: TJSONObject;
+  LHashArray, LProperties, LRefs, LRefHashes: TJSONArray;
   LProp: TJSONObject;
+  LFileName: string;
+
+  procedure AddProperty(const AName, AValue: string);
+  begin
+    LProp := TJSONObject.Create;
+    LProp.AddPair('name', AName);
+    LProp.AddPair('value', AValue);
+    LProperties.Add(LProp);
+  end;
+
 begin
   LComponent := TJSONObject.Create;
 
   // Component type
   if AArtefact.ArtefactType = 'application' then
     LComponent.AddPair('type', 'application')
+  else if AArtefact.ArtefactType = 'framework' then
+    LComponent.AddPair('type', 'framework')
   else if (AArtefact.ArtefactType = 'library') or
     (AArtefact.ArtefactType = 'unit-evidence') or
     (AArtefact.ArtefactType = 'package') or
     (AArtefact.ArtefactType = 'runtime-package') or
-    (AArtefact.ArtefactType = 'external-reference') then
+    (AArtefact.ArtefactType = 'external-reference') or
+    (AArtefact.ArtefactType = 'required-package') then
     LComponent.AddPair('type', 'library')
   else
     LComponent.AddPair('type', 'file');
 
-  // Name (filename without path)
-  LComponent.AddPair('name', TPath.GetFileName(AArtefact.RelativePath));
+  // Name. Build mode uses the file name. Library mode sets ComponentName
+  // to the relative path so two files with the same name stay distinct.
+  LComponent.AddPair('name', ArtefactComponentName(AArtefact));
 
-  // Version (use hash prefix as pseudo-version for files)
-  if AArtefact.Hash <> '' then
-    LComponent.AddPair('version', Copy(AArtefact.Hash, 1, 12));
+  // Version. Build mode and library mode both set the product or release
+  // version on the files they ship. The built program with no version of
+  // its own, such as an Android .so, uses the product version. A component
+  // that still has no version has no version field. The hash is in hashes.
+  if AVersion <> '' then
+    LComponent.AddPair('version', AVersion);
 
   // BOM reference
   LComponent.AddPair('bom-ref', 'comp-' + IntToStr(AIndex));
 
-  // File path
-  LComponent.AddPair('purl', 'file:' + AArtefact.RelativePath);
+  // A file has no package URL of its own. A file: path is not a purl, so
+  // none is written; bom-ref and the file name identify the component. A
+  // manifest library component carries its purl through the manifest.
 
-  // Hashes
-  if AArtefact.Hash <> '' then
+  // Hashes. SHA-256 stays first. SHA-512 is added when the file was hashed.
+  if (AArtefact.Hash <> '') or (AArtefact.HashSha512 <> '') then
   begin
     LHashArray := TJSONArray.Create;
 
-    LHashes := TJSONObject.Create;
-    LHashes.AddPair('alg', 'SHA-256');
-    LHashes.AddPair('content', LowerCase(AArtefact.Hash));
-    LHashArray.Add(LHashes);
+    if AArtefact.Hash <> '' then
+    begin
+      LHashes := TJSONObject.Create;
+      LHashes.AddPair('alg', 'SHA-256');
+      LHashes.AddPair('content', LowerCase(AArtefact.Hash));
+      LHashArray.Add(LHashes);
+    end;
+    if AArtefact.HashSha512 <> '' then
+    begin
+      LHashes := TJSONObject.Create;
+      LHashes.AddPair('alg', 'SHA-512');
+      LHashes.AddPair('content', LowerCase(AArtefact.HashSha512));
+      LHashArray.Add(LHashes);
+    end;
 
     LComponent.AddPair('hashes', LHashArray);
+  end;
+
+  // The built program carries the product licence (issue #131). An
+  // Embarcadero unit carries its origin label (issue #165). An own-code
+  // unit carries the product licence when one is set (issue #166).
+  // Empty writes nothing.
+  AddCycloneDxLicences(LComponent, ALicence, '');
+
+  // TR-03183-2 maps the deployable SHA-512 to externalReferences type
+  // distribution. bom-1.6 requires a url, and no download URL is known, so
+  // the url is the file: locator of the shipped file. The reference
+  // is written for a hashed executable or archive. Unit evidence is not a
+  // deployable file. The component hashes above stay as well.
+  if (AArtefact.HashSha512 <> '') and
+     (IsBsiExecutableArtefact(AArtefact) or
+      IsBsiArchiveFileName(BsiComponentFileName(AArtefact.RelativePath))) then
+  begin
+    LRefs := TJSONArray.Create;
+    LRef := TJSONObject.Create;
+    LRefHashes := TJSONArray.Create;
+    LRefHash := TJSONObject.Create;
+    LRef.AddPair('type', 'distribution');
+    LRef.AddPair('url', 'file:' + AArtefact.RelativePath);
+    LRefHash.AddPair('alg', 'SHA-512');
+    LRefHash.AddPair('content', LowerCase(AArtefact.HashSha512));
+    LRefHashes.Add(LRefHash);
+    LRef.AddPair('hashes', LRefHashes);
+    LRefs.Add(LRef);
+    LComponent.AddPair('externalReferences', LRefs);
   end;
 
   // Properties
@@ -232,6 +347,37 @@ begin
     LProp.AddPair('value', AArtefact.Confidence);
     LProperties.Add(LProp);
   end;
+  if AArtefact.Conditional then
+  begin
+    LProp := TJSONObject.Create;
+    LProp.AddPair('name', 'net.developer-experts.dx-comply:conditional');
+    LProp.AddPair('value', 'true');
+    LProperties.Add(LProp);
+  end;
+  if AArtefact.LibrarySourceFile and (AArtefact.RelativePath <> '') then
+    AddProperty('net.developer-experts.dx-comply:relativePath', AArtefact.RelativePath);
+  // Issue #59: where a source-scanned DLL was found.
+  if AArtefact.LocationSource <> '' then
+    AddProperty('net.developer-experts.dx-comply:locationSource', AArtefact.LocationSource);
+  if AArtefact.Location <> '' then
+    AddProperty('net.developer-experts.dx-comply:location', AArtefact.Location);
+  // Issue #109: the version is the file modification time, not a real version.
+  // A product version used in place of that stand-in is not a file date.
+  if ComponentVersionFromFileDate(AArtefact, AVersion) then
+    AddProperty(cVersionSourceProperty, cVersionSourceFileDate);
+
+  // BSI TR-03183-2 file properties. Omitted when there is no file name,
+  // which is how a logical component is left without these fields.
+  LFileName := BsiComponentFileName(AArtefact.RelativePath);
+  if LFileName <> '' then
+  begin
+    AddProperty('bsi:component:filename', LFileName);
+    AddProperty('bsi:component:executable', BsiExecutableValue(AArtefact));
+    AddProperty('bsi:component:archive', BsiArchiveValue(LFileName));
+    AddProperty('bsi:component:structured', BsiStructuredValue(LFileName));
+  end;
+  if AUnresolvedSource then
+    AddProperty(cUnresolvedDependenciesProperty, cUnresolvedDependenciesValue);
 
   if LProperties.Count > 0 then
     LComponent.AddPair('properties', LProperties)
@@ -242,22 +388,53 @@ begin
 end;
 
 function TCycloneDxJsonWriter.BuildDependencies(const AArtefacts: TArtefactList;
-  const AProjectBomRef: string): TJSONArray;
+  const AProjectBomRef, AOutputFilePath: string): TJSONArray;
 var
   LDependsOn: TJSONArray;
   LDep: TJSONObject;
+  LTargetIndex: Integer;
+  LGroup: Integer;
   I: Integer;
 begin
   Result := TJSONArray.Create;
 
-  // Root dependency (project depends on all components)
+  // Project -> deliverable (exe/dll/bpl). When the output has no deliverable,
+  // keep a single edge list so components are not dropped from the graph.
+  LTargetIndex := FindDeliverableTargetIndex(AArtefacts, AProjectBomRef,
+    AOutputFilePath);
+
   LDep := TJSONObject.Create;
   LDep.AddPair('ref', AProjectBomRef);
-
   LDependsOn := TJSONArray.Create;
-  for I := 0 to AArtefacts.Count - 1 do
-    LDependsOn.Add('comp-' + IntToStr(I));
+  if LTargetIndex >= 0 then
+    LDependsOn.Add('comp-' + IntToStr(LTargetIndex))
+  else if Assigned(AArtefacts) then
+    for I := 0 to AArtefacts.Count - 1 do
+      LDependsOn.Add('comp-' + IntToStr(I));
+  LDep.AddPair('dependsOn', LDependsOn);
+  Result.Add(LDep);
 
+  if (LTargetIndex < 0) or not Assigned(AArtefacts) then
+    Exit;
+
+  // Deliverable -> runtime packages, then external DLLs, then linked
+  // units, then any other output. Keeping each category together is the
+  // grouped graph from issue #42.
+  LDependsOn := TJSONArray.Create;
+  for LGroup := 0 to 3 do
+    for I := 0 to AArtefacts.Count - 1 do
+      if (I <> LTargetIndex) and
+         (ArtefactDependencyGroup(AArtefacts[I]) = LGroup) then
+        LDependsOn.Add('comp-' + IntToStr(I));
+
+  if LDependsOn.Count = 0 then
+  begin
+    LDependsOn.Free;
+    Exit;
+  end;
+
+  LDep := TJSONObject.Create;
+  LDep.AddPair('ref', 'comp-' + IntToStr(LTargetIndex));
   LDep.AddPair('dependsOn', LDependsOn);
   Result.Add(LDep);
 end;
@@ -271,7 +448,15 @@ var
   LComponents: TJSONArray;
   LDependencies: TJSONArray;
   LOutput: TStringList;
+  LGraph: TUsesDependencyGraph;
+  LCovered: TArray<Boolean>;
   I: Integer;
+  LRootIndex: Integer;
+  LManifest: TComponentManifest;
+  LLicenceError: string;
+  LLicence: string;
+  LVersion: string;
+  LIsDeliverable: Boolean;
 begin
   Result := False;
   if AOutputPath = '' then
@@ -285,7 +470,7 @@ begin
   LRoot := TJSONObject.Create;
   try
     // CycloneDX version
-    LRoot.AddPair('$schema', 'http://cyclonedx.org/schema/bom-1.5.schema.json');
+    LRoot.AddPair('$schema', 'http://cyclonedx.org/schema/bom-1.6.schema.json');
     LRoot.AddPair('bomFormat', 'CycloneDX');
     LRoot.AddPair('specVersion', cSpecVersion);
     LRoot.AddPair('serialNumber', 'urn:uuid:' + GenerateUuid);
@@ -297,20 +482,71 @@ begin
     LMetadataObj := BuildMetadata(AMetadata, AProjectInfo);
     LRoot.AddPair('metadata', LMetadataObj);
 
+    // Uses edges are built once. Component properties and compositions share
+    // that result, so an uncached .pas is not parsed twice. Covered units
+    // are reached through a uses edge and leave the program's list.
+    LGraph := BuildUsesDependencyGraph(AArtefacts);
+    LCovered := UnitsCoveredByUsesEdges(AArtefacts, LGraph);
+
     // Components
     LComponents := TJSONArray.Create;
+    LRootIndex := FindDeliverableTargetIndex(AArtefacts, AProjectInfo.ProjectName,
+      AProjectInfo.OutputFilePath);
+    LManifest := Default(TComponentManifest);
+    if Trim(AMetadata.ComponentManifestJson) <> '' then
+    begin
+      // A failed parse leaves the manifest unloaded. A non-empty error does too.
+      if not TryParseComponentManifest(AMetadata.ComponentManifestJson, '',
+        LManifest, LLicenceError) or (LLicenceError <> '') then
+        LManifest := Default(TComponentManifest);
+    end;
     for I := 0 to AArtefacts.Count - 1 do
-      LComponents.Add(BuildComponent(AArtefacts[I], I));
+    begin
+      LIsDeliverable := IsSameDeliverableFile(AArtefacts, I, LRootIndex);
+      LLicence := ComponentLicenceFor(AArtefacts[I], LIsDeliverable,
+        AMetadata.Licence, LManifest);
+      LVersion := ComponentVersionFor(AArtefacts[I], LIsDeliverable,
+        AMetadata.ProductVersion, AProjectInfo.Version);
+      LComponents.Add(BuildComponent(AArtefacts[I], I,
+        LGraph.Status[I] = uusMissingSource, LLicence, LVersion));
+    end;
     LRoot.AddPair('components', LComponents);
 
-    // Dependencies
-    LDependencies := BuildDependencies(AArtefacts, AProjectInfo.ProjectName);
+    // Dependencies. A component manifest groups matched units under one
+    // library and links those units from that library. Uses edges are added
+    // after that rewrite so they are not folded into the program.
+    LDependencies := BuildDependencies(AArtefacts, AProjectInfo.ProjectName,
+      AProjectInfo.OutputFilePath);
+    if AMetadata.ComponentManifestJson <> '' then
+      ApplyManifestCycloneDxJson(AMetadata.ComponentManifestJson, AArtefacts,
+        LComponents, LDependencies, AProjectInfo.ProjectName);
+    // After the manifest rewrite, so a matched unit is still replaced by
+    // its library. A unit another unit uses then drops off the program.
+    RemoveCoveredUnits(LDependencies, AProjectInfo.ProjectName, LCovered);
+    if LRootIndex >= 0 then
+      RemoveCoveredUnits(LDependencies, 'comp-' + IntToStr(LRootIndex), LCovered);
+    AppendUsesDependenciesJson(LDependencies, LGraph);
     LRoot.AddPair('dependencies', LDependencies);
+
+    // Completeness is per component. A unit whose uses names all resolve is
+    // complete. The program, a runtime package, a DLL, and a unit with no
+    // source stay incomplete. See docs/BSI-TR-03183-2.md.
+    // Library mode replaces that graph with the scanned source set.
+    if AMetadata.LibraryCompositions then
+      WriteLibraryCompositionsJson(LRoot, BuildLibraryCompositionGroups(
+        AArtefacts, AProjectInfo.ProjectName, AMetadata.LibraryFilesComplete,
+        AMetadata.LibraryRequiresDeclared))
+    else
+      WriteCompositionsJson(LRoot, AProjectInfo.ProjectName, LGraph,
+        ManifestLibraryBomRefs(AMetadata.ComponentManifestJson, AArtefacts));
 
     // Write to file
     LOutput := TStringList.Create;
     try
       LOutput.Text := LRoot.Format(2);  // Pretty print with 2-space indent
+      // RFC 8259 section 8.1: JSON text is UTF-8 without a byte order mark.
+      // Strict parsers reject a file that starts with one.
+      LOutput.WriteBOM := False;
       LOutput.SaveToFile(AOutputPath, TEncoding.UTF8);
       Result := True;
     finally

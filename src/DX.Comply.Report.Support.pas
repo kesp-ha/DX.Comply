@@ -1,6 +1,6 @@
 ﻿/// <summary>
 /// DX.Comply.Report.Support
-/// Shared formatting helpers for human-readable compliance reports.
+/// Shared formatting helpers for human-readable SBOM reports.
 /// </summary>
 ///
 /// <remarks>
@@ -53,8 +53,18 @@ function UnitOriginKindToString(AValue: TUnitOriginKind): string;
 function ResolutionConfidenceToString(AValue: TResolutionConfidence): string;
 function ValidationStatusText(const AData: TComplianceReportData): string;
 function SafeText(const AValue: string; const AFallback: string = 'n/a'): string;
+/// <summary>
+/// True when AValue starts with http:// or https://. The reports only make
+/// such a value a link, so a value like "javascript:..." stays plain text.
+/// </summary>
+function IsHttpUrl(const AValue: string): Boolean;
 function DelphiRuntimeUnitsText(const AProjectInfo: TProjectInfo): string;
-function HumanReadableReportTitle: string;
+/// <summary>
+/// Report title. The project name is the prefix, so several open reports
+/// can be told apart. The product name is used when the project name is
+/// empty. With neither name the title stays "DX.Comply SBOM Report".
+/// </summary>
+function HumanReadableReportTitle(const AProjectName, AProductName: string): string;
 function HumanReadableReportSubtitle: string;
 function HumanReadableReportGenerator: string;
 function RelativeOutputReference(const ABaseFilePath, ATargetFilePath: string): string;
@@ -87,6 +97,14 @@ begin
   else
     Result := 'Unknown';
   end;
+end;
+
+function IsHttpUrl(const AValue: string): Boolean;
+var
+  LValue: string;
+begin
+  LValue := LowerCase(Trim(AValue));
+  Result := LValue.StartsWith('http://') or LValue.StartsWith('https://');
 end;
 
 function DelphiRuntimeUnitsText(const AProjectInfo: TProjectInfo): string;
@@ -122,13 +140,20 @@ end;
 
 function HumanReadableReportSubtitle: string;
 begin
-  Result := 'This DX.Comply Software Release Assessment summarizes the generated Software Bill of Materials (SBOM), build evidence and deliverable artefacts for the assessed release. ' +
-    'It serves as the human-readable companion to the formal SBOM output for review, audit and release approval activities.';
+  Result := 'This report lists the units, packages and DLL names DX.Comply could see in the build, with a hash where the file could be opened. ' +
+    'It sits beside the SBOM. The status below is an internal structural check.';
 end;
 
-function HumanReadableReportTitle: string;
+function HumanReadableReportTitle(const AProjectName, AProductName: string): string;
+var
+  LName: string;
 begin
-  Result := 'DX.Comply Software Release Assessment (SRA) and SBOM Compliance Report';
+  LName := Trim(AProjectName);
+  if LName = '' then
+    LName := Trim(AProductName);
+  Result := 'DX.Comply SBOM Report';
+  if LName <> '' then
+    Result := LName + ' - ' + Result;
 end;
 
 function HumanReadableReportFormatToString(AValue: THumanReadableReportFormat): string;
@@ -284,9 +309,10 @@ end;
 function SbomFormatToString(AValue: TSbomFormat): string;
 begin
   case AValue of
-    sfCycloneDxJson: Result := 'CycloneDX JSON';
-    sfCycloneDxXml: Result := 'CycloneDX XML';
-    sfSpdxJson: Result := 'SPDX JSON';
+    sfCycloneDxJson: Result := 'CycloneDX 1.6 JSON';
+    sfCycloneDxXml: Result := 'CycloneDX 1.6 XML';
+    sfSpdxJson: Result := 'SPDX 2.3 JSON';
+    sfSpdx3Json: Result := 'SPDX 3.0.1 JSON-LD';
   else
     Result := 'Unknown';
   end;
@@ -321,8 +347,8 @@ end;
 function ValidationStatusText(const AData: TComplianceReportData): string;
 begin
   if AData.ValidationResult.IsValid then
-    Exit('Passed');
-  Result := 'Failed';
+    Exit('Internal structural check passed');
+  Result := 'Internal structural check failed';
 end;
 
 end.

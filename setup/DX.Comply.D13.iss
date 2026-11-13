@@ -3,7 +3,11 @@
 ; and registers the IDE package in the Delphi 13 Known Packages.
 
 #define MyAppName "DX.Comply"
-#define MyAppVersion "1.3.0"
+; The Forge passes /DMyAppVersion=2.1.0. An unconditional #define would override that.
+; 0.0.0 is only the fallback when the switch is absent.
+#ifndef MyAppVersion
+#define MyAppVersion "0.0.0"
+#endif
 #define MyAppPublisher "Olaf Monien"
 #define MyAppURL "https://github.com/omonien/DX.Comply"
 #define BDSVersion "37.0"
@@ -15,6 +19,7 @@
 AppId={{F4A7E2B1-8C3D-4E5F-9A1B-2C3D4E5F6A7B}
 AppName={#MyAppName} for {#DelphiName}
 AppVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 DefaultDirName={localappdata}\{#MyAppName}
@@ -35,8 +40,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "german"; MessagesFile: "compiler:Languages\German.isl"
 
 [Messages]
-english.BeveledLabel=DX.Comply - CRA Compliance for Delphi
-german.BeveledLabel=DX.Comply - CRA-Compliance für Delphi
+english.BeveledLabel=DX.Comply - SBOM documentation for Delphi
+german.BeveledLabel=DX.Comply - SBOM-Dokumentation für Delphi
 
 [Files]
 ; BPLs and DCPs
@@ -45,7 +50,11 @@ Source: "..\build\Win32\Release\DX.Comply.IDE{#DllSuffix}.bpl"; DestDir: "{app}\
 Source: "..\build\Win32\Release\dcu\DX.Comply.Engine.dcp"; DestDir: "{app}\dcp"; Flags: ignoreversion
 Source: "..\build\Win32\Release\dcu\DX.Comply.IDE.dcp"; DestDir: "{app}\dcp"; Flags: ignoreversion
 ; CLI tool
-Source: "..\build\Win32\Release\DX.Comply.CLI.exe"; DestDir: "{app}\bin"; DestName: "dxcomply.exe"; Flags: ignoreversion
+Source: "..\build\Win32\Release\dxcomply.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+; Deep-Evidence build script, next to each binary. The orchestrator runs this
+; copy instead of a script found inside the project being scanned.
+Source: "..\build\DelphiBuildDPROJ.ps1"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "..\build\DelphiBuildDPROJ.ps1"; DestDir: "{app}\bpl"; Flags: ignoreversion
 ; Documentation
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
@@ -53,12 +62,14 @@ Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\DX.Comply.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
-; Register IDE BPL in Known Packages (HKCU — no admin required)
-Root: HKCU; Subkey: "{#BDSRegKey}\Known Packages"; ValueType: string; ValueName: "{app}\bpl\DX.Comply.IDE{#DllSuffix}.bpl"; ValueData: "DX.Comply CRA Compliance Documentation"; Flags: uninsdeletevalue
+; Register IDE BPL in Known Packages (HKCU, no admin required)
+Root: HKCU; Subkey: "{#BDSRegKey}\Known Packages"; ValueType: string; ValueName: "{app}\bpl\DX.Comply.IDE{#DllSuffix}.bpl"; ValueData: "DX.Comply SBOM documentation"; Flags: uninsdeletevalue
 ; Add BPL directory to the IDE search path so the Engine BPL is found at runtime
 Root: HKCU; Subkey: "{#BDSRegKey}\Environment Variables"; ValueType: string; ValueName: "DXCOMPLY"; ValueData: "{app}\bpl"; Flags: uninsdeletevalue
 
 [Code]
+#include "DX.Comply.StalePaths.iss"
+
 function IsDelphi13Installed: Boolean;
 begin
   Result := RegKeyExists(HKEY_LOCAL_MACHINE, 'SOFTWARE\Embarcadero\BDS\{#BDSVersion}') or
@@ -78,6 +89,19 @@ begin
            mbError, MB_OK);
     Result := False;
   end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  // Clean up library path entries left by an earlier GetIt install (#67).
+  if CurStep = ssPostInstall then
+    CleanStaleDXComplyGetItPaths;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    CleanStaleDXComplyGetItPaths;
 end;
 
 [Run]

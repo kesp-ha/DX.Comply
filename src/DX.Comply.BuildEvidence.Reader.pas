@@ -24,6 +24,8 @@ uses
   System.IOUtils,
   DX.Comply.Engine.Intf,
   DX.Comply.BuildEvidence.Intf,
+  DX.Comply.LegacyProject,
+  DX.Comply.MapFile.LldReader,
   DX.Comply.MapFile.Reader;
 
 type
@@ -83,12 +85,102 @@ type
     function Read(const AProjectInfo: TProjectInfo): TBuildEvidence;
   end;
 
+/// <summary>
+/// One log line for a build evidence item: display name, unit or package,
+/// path, and detail. Unit rows are included. The engine summarises those.
+/// </summary>
+function BuildEvidenceItemLogLine(const AItem: TBuildEvidenceItem): string;
+
 implementation
 
 uses
   System.Classes,
   System.StrUtils,
   System.SysUtils;
+
+function PlatformUsesMapFileArm(const APlatform: string): Boolean;
+begin
+  // Android and the iOS device linker expose "Map file ARM" (Off / On).
+  // iOSSimARM64 uses that linker. The Windows "Map file > Detailed" list
+  // is not on those pages.
+  var LPlatform := Trim(APlatform);
+  Result := StartsText('Android', LPlatform) or
+    StartsText('iOSDevice', LPlatform) or
+    SameText(LPlatform, 'iOSSimARM64');
+end;
+
+function MapFileArmEnableHint: string;
+begin
+  // ARM targets have no Off / Segments / Publics / Detailed list. "On" writes
+  // the LLVM linker map that TLldMapReader reads.
+  Result := 'Enable the map with Project Options > Linker > Map file ARM > On, then rebuild. ' +
+    'ARM targets have no "Detailed" map setting; On is the only map option there.';
+end;
+
+function ClassicDetailedMapHint: string;
+begin
+  Result :=
+    'Enable detailed MAP output (Project Options > Linker > Map file > Detailed)' +
+    ' or set DCC_MapFile=3 in the .dproj, then rebuild for full composition evidence.';
+end;
+
+function MapFileNoUnitsWarning(const AProjectInfo: TProjectInfo): string;
+begin
+  if AProjectInfo.IsLegacyProject then
+    Exit('MAP file found but contains no unit information: ' +
+      AProjectInfo.MapFilePath + '. ' +
+      'In Delphi 7 open Project Options, Linker, and set Map file to Detailed, ' +
+      'or add -GD to the .cfg, then rebuild.');
+
+  if PlatformUsesMapFileArm(AProjectInfo.Platform) then
+    Exit('MAP file found but contains no unit information DX.Comply can read: ' +
+      AProjectInfo.MapFilePath + '. ' +
+      'It is neither an LLVM linker map (header "VMA LMA Size Align Out In Symbol") ' +
+      'nor a map with classic unit sections, and DX.Comply did not guess any units. ' +
+      MapFileArmEnableHint);
+
+  if StartsText('Linux', Trim(AProjectInfo.Platform)) then
+    Exit('MAP file found but contains no unit information DX.Comply can read: ' +
+      AProjectInfo.MapFilePath + '. ' +
+      'DX.Comply does not know how to read units from the Linux map format ' +
+      'and did not guess any.');
+
+  Result := 'MAP file found but contains no unit information: ' +
+    AProjectInfo.MapFilePath + '. ' + ClassicDetailedMapHint;
+end;
+
+function MapFileMissingWarning(const AProjectInfo: TProjectInfo): string;
+begin
+  if AProjectInfo.IsLegacyProject then
+    Exit(LegacyMapFileMissingMessage(AProjectInfo.MapFilePath));
+
+  if PlatformUsesMapFileArm(AProjectInfo.Platform) then
+    Exit('No MAP file found: ' + AProjectInfo.MapFilePath + '. ' + MapFileArmEnableHint);
+
+  if StartsText('Linux', Trim(AProjectInfo.Platform)) then
+    Exit('No MAP file found: ' + AProjectInfo.MapFilePath + '. ' +
+      'DX.Comply does not know which IDE option writes a Linux map file.');
+
+  Result := 'No detailed MAP file found: ' + AProjectInfo.MapFilePath;
+end;
+
+function BuildEvidenceItemLogLine(const AItem: TBuildEvidenceItem): string;
+begin
+  Result := Trim(AItem.DisplayName);
+  if Result = '' then
+    Result := 'Build evidence';
+
+  if Trim(AItem.UnitName) <> '' then
+    Result := Result + ': ' + Trim(AItem.UnitName)
+  else if Trim(AItem.PackageName) <> '' then
+    Result := Result + ': ' + Trim(AItem.PackageName);
+
+  if Trim(AItem.FilePath) <> '' then
+    Result := Result + ' - ' + Trim(AItem.FilePath);
+
+  if Trim(AItem.Detail) <> '' then
+    Result := Result + ' [' + Trim(AItem.Detail) + ']';
+end;
 
 procedure TBuildEvidenceReader.AddEvidenceItem(var ABuildEvidence: TBuildEvidence;
   ASourceKind: TBuildEvidenceSourceKind; const ADisplayName, AFilePath,
@@ -464,7 +556,10 @@ begin
   Result.Paths.MapFilePath := AProjectInfo.MapFilePath;
 
   CopyUniqueValues(AProjectInfo.ProjectSearchPaths, Result.SearchPaths);
-  CollectCompilerOptionEvidence(AProjectInfo, Result);
+  // Legacy scans already merged .dof over .cfg. Reading the .cfg again would
+  // put the losing values back into the search path.
+  if not AProjectInfo.IsLegacyProject then
+    CollectCompilerOptionEvidence(AProjectInfo, Result);
   CopyUniqueValues(AProjectInfo.SearchPaths, Result.SearchPaths);
   CopyUniqueValues(AProjectInfo.GlobalSearchPaths, Result.SearchPaths);
   CopyUniqueValues(AProjectInfo.UnitScopeNames, Result.UnitScopeNames);
@@ -498,28 +593,45 @@ begin
 
     if TFile.Exists(AProjectInfo.MapFilePath) then
     begin
-      AddEvidenceItem(Result, besMapFile, 'Detailed map file',
+      AddEvidenceItem(Result, besMapFile, 'Map file',
         AProjectInfo.MapFilePath, '', '', 'MapFile');
 
-      LMapUnitNames := TMapFileReader.ReadUnitNames(AProjectInfo.MapFilePath);
-      for LMapUnitName in LMapUnitNames do
-        AddEvidenceItem(Result, besMapFile, 'Unit from map file',
-          AProjectInfo.MapFilePath, '', LMapUnitName, 'LineNumbersSection');
+      // An ARM/LLVM linker map (Android, iOS, Linux, macOS ARM) is recognised
+      // by its header and read by TLldMapReader. That reader is asked first:
+      // it stops after the leading lines of any other map, and it streams an
+      // LLD map, which can be tens of megabytes. The classic reader loads the
+      // whole file, so it only runs for a map without the LLD header.
+      var LLldContents := TLldMapReader.Read(AProjectInfo.MapFilePath);
+      if LLldContents.IsLldMap then
+      begin
+        for var LLldUnitName in LLldContents.UnitNames do
+          AddEvidenceItem(Result, besMapFile, 'Unit from map file',
+            AProjectInfo.MapFilePath, '', LLldUnitName, 'LldInputSection');
+        for var LNativeComponent in LLldContents.NativeComponents do
+          AddEvidenceItem(Result, besMapFile, 'Native component from map file',
+            AProjectInfo.MapFilePath, LNativeComponent, '', 'LldArchiveMember');
+        if Length(LLldContents.UnitNames) = 0 then
+          Result.Warnings.Add('LLVM linker map found but it lists no Delphi unit objects: ' +
+            AProjectInfo.MapFilePath + '.');
+      end
+      else
+      begin
+        LMapUnitNames := TMapFileReader.ReadUnitNames(AProjectInfo.MapFilePath);
+        for LMapUnitName in LMapUnitNames do
+          AddEvidenceItem(Result, besMapFile, 'Unit from map file',
+            AProjectInfo.MapFilePath, '', LMapUnitName, 'LineNumbersSection');
 
-      // MAP file exists but yields no unit entries — it is a segment-only or
-      // public-symbols MAP, not the detailed format DX.Comply requires.
-      // Emit an actionable warning so the user knows exactly what to change.
-      if Length(LMapUnitNames) = 0 then
-        Result.Warnings.Add(
-          'MAP file found but contains no unit information: ' +
-          AProjectInfo.MapFilePath + '. ' +
-          'Enable detailed MAP output (Project Options > Linker > Map file > Detailed)' +
-          ' or set DCC_MapFile=3 in the .dproj, then rebuild for full composition evidence.');
+        // No classic unit sections either. The layout is not guessed:
+        // Windows and macOS are told to switch the map to Detailed, the ARM
+        // and Linux messages say what was found.
+        if Length(LMapUnitNames) = 0 then
+          Result.Warnings.Add(MapFileNoUnitsWarning(AProjectInfo));
+      end;
     end;
 
     if not TFile.Exists(AProjectInfo.MapFilePath) then
     begin
-      Result.Warnings.Add('No detailed MAP file found: ' + AProjectInfo.MapFilePath);
+      Result.Warnings.Add(MapFileMissingWarning(AProjectInfo));
 
       LRsmFilePath := ChangeFileExt(AProjectInfo.MapFilePath, '.rsm');
       if TFile.Exists(LRsmFilePath) then

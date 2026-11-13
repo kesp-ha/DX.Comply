@@ -27,6 +27,7 @@ interface
 uses
   System.SysUtils,
   System.Classes,
+  System.Generics.Collections,
   Winapi.Windows,
   Winapi.Messages,
   Vcl.Forms,
@@ -36,7 +37,8 @@ uses
   Vcl.Graphics,
   Vcl.ExtCtrls,
   DX.Comply.Engine,
-  DX.Comply.Engine.Intf;
+  DX.Comply.Engine.Intf,
+  DX.Comply.IDE.UiText;
 
 type
   /// <summary>
@@ -76,6 +78,7 @@ type
   TFormDXComplyProgressDialog = class(TForm)
   private
     FThread: TGenerationThread;
+    FHeaderWarnings: TList<string>;
     FCompleted: Boolean;
     FSuccess: Boolean;
     FProjectPath: string;
@@ -112,6 +115,10 @@ type
     /// </summary>
     procedure StartGeneration;
     property Success: Boolean read FSuccess;
+    /// <summary>
+    /// CRA/BSI warnings about missing SBOM header data seen in the log.
+    /// </summary>
+    function HeaderWarnings: TArray<string>;
   end;
 
 /// <summary>
@@ -120,12 +127,24 @@ type
 /// </summary>
 function ShowDXComplyProgressDialog(
   const AProjectPath, AOutputPath: string;
-  AFormat: TSbomFormat; const AConfig: TSbomConfig): Boolean;
+  AFormat: TSbomFormat; const AConfig: TSbomConfig): Boolean; overload;
+
+/// <summary>
+/// Same as above. AHeaderWarnings returns the CRA/BSI warnings about missing
+/// SBOM header data, so the caller can offer the SBOM header dialog.
+/// </summary>
+function ShowDXComplyProgressDialog(
+  const AProjectPath, AOutputPath: string;
+  AFormat: TSbomFormat; const AConfig: TSbomConfig;
+  out AHeaderWarnings: TArray<string>): Boolean; overload;
 
 implementation
 
+uses
+  DX.Comply.CraChecks;
+
 const
-  cColorHeader   = $2B2E36;  // Dark charcoal — branded header
+  cColorHeader   = $2B2E36;  // Dark charcoal header
   cColorTitle    = $E8ECEF;  // Near-white title text
   cColorSubtitle = $9AA0A8;  // Muted subtitle text
   cColorSuccess  = $107C10;  // Windows green
@@ -204,6 +223,7 @@ begin
   FCompleted := False;
   FSuccess := False;
   FThread := nil;
+  FHeaderWarnings := TList<string>.Create;
   BuildUI;
   OnCloseQuery := FormCloseQuery;
 end;
@@ -217,7 +237,13 @@ begin
     FThread.Free;
     FThread := nil;
   end;
+  FHeaderWarnings.Free;
   inherited;
+end;
+
+function TFormDXComplyProgressDialog.HeaderWarnings: TArray<string>;
+begin
+  Result := FHeaderWarnings.ToArray;
 end;
 
 procedure TFormDXComplyProgressDialog.BuildUI;
@@ -237,10 +263,14 @@ var
 begin
   LM := S(20);
 
-  Caption := 'DX.Comply - CRA Documentation Generator';
+  Caption := 'DX.Comply - SBOM';
   ClientWidth := S(780);
   ClientHeight := S(560);
-  BorderStyle := bsDialog;
+  // Issue #87: allow resizing so long log lines stay readable.
+  BorderStyle := bsSizeable;
+  BorderIcons := [biSystemMenu, biMaximize];
+  Constraints.MinWidth := S(480);
+  Constraints.MinHeight := S(360);
   Position := poScreenCenter;
   Color := clWhite;
   Font.Name := 'Segoe UI';
@@ -276,7 +306,7 @@ begin
   FLabelSubtitle := TLabel.Create(FPanelHeader);
   FLabelSubtitle.Parent := FPanelHeader;
   FLabelSubtitle.Align := alTop;
-  FLabelSubtitle.Caption := 'Generating CRA compliance documentation';
+  FLabelSubtitle.Caption := 'Generating SBOM';
   FLabelSubtitle.Font.Name := 'Segoe UI';
   FLabelSubtitle.Font.Size := 10;
   FLabelSubtitle.Font.Color := cColorSubtitle;
@@ -428,7 +458,8 @@ begin
   FMemoLog.Parent := LLogWrapper;
   FMemoLog.Align := alClient;
   FMemoLog.ReadOnly := True;
-  FMemoLog.ScrollBars := ssVertical;
+  // Issue #87: horizontal scrollbar for long diagnostic lines.
+  FMemoLog.ScrollBars := ssBoth;
   FMemoLog.WordWrap := False;
   FMemoLog.Font.Name := 'Consolas';
   FMemoLog.Font.Size := 10;
@@ -459,6 +490,10 @@ procedure TFormDXComplyProgressDialog.PostProgress(
   const AMessage: string; AProgress: Integer);
 begin
   FMemoLog.Lines.Add(AMessage);
+  if IsSbomHeaderWarning(AMessage) and not FHeaderWarnings.Contains(AMessage) then
+  begin
+    FHeaderWarnings.Add(AMessage);
+  end;
   // Scroll log to the latest entry
   SendMessage(FMemoLog.Handle, WM_VSCROLL, SB_BOTTOM, 0);
 
@@ -493,7 +528,7 @@ begin
     FProgressBar.Position := 100;
     FLabelPercent.Caption := '100%';
     FPanelHeader.Color := cColorSuccess;
-    FLabelSubtitle.Caption := 'CRA documentation generated successfully';
+    FLabelSubtitle.Caption := 'SBOM generated';
     FLabelSubtitle.Font.Color := cColorTitle;
     FLabelStep.Caption := 'All tasks completed.';
     FLabelStep.Font.Color := cColorSuccess;
@@ -506,9 +541,10 @@ begin
     FLabelSubtitle.Caption := 'Generation failed';
     FLabelSubtitle.Font.Color := cColorTitle;
     // Issue #29: the diagnostic output lives in the log memo on this same
-    // progress dialog (FMemoLog above), NOT in the IDE Messages window —
-    // DX.Comply routes its progress messages here, not to the IDE.
-    FLabelStep.Caption := 'Generation failed - check the log output in this dialog above.';
+    // progress dialog (FMemoLog above), not in the IDE Messages window.
+    // DX.Comply routes its progress messages here.
+    // Issue #86: the log memo is below this step label, not above it.
+    FLabelStep.Caption := scProgressDialogGenerationFailedCheckLog;
     FLabelStep.Font.Color := cColorError;
     FLabelStatus.Caption := 'Failed';
     FLabelStatus.Font.Color := cColorError;
@@ -564,6 +600,17 @@ function ShowDXComplyProgressDialog(
   const AProjectPath, AOutputPath: string;
   AFormat: TSbomFormat; const AConfig: TSbomConfig): Boolean;
 var
+  LHeaderWarnings: TArray<string>;
+begin
+  Result := ShowDXComplyProgressDialog(AProjectPath, AOutputPath, AFormat,
+    AConfig, LHeaderWarnings);
+end;
+
+function ShowDXComplyProgressDialog(
+  const AProjectPath, AOutputPath: string;
+  AFormat: TSbomFormat; const AConfig: TSbomConfig;
+  out AHeaderWarnings: TArray<string>): Boolean;
+var
   LDialog: TFormDXComplyProgressDialog;
 begin
   LDialog := TFormDXComplyProgressDialog.Create(nil,
@@ -572,6 +619,7 @@ begin
     LDialog.StartGeneration;
     LDialog.ShowModal;
     Result := LDialog.Success;
+    AHeaderWarnings := LDialog.HeaderWarnings;
   finally
     LDialog.Free;
   end;

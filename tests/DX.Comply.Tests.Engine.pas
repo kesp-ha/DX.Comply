@@ -8,8 +8,8 @@
 /// SBOM generation against the real engine .dproj, configuration defaults,
 /// and GenerateFromConfig fall-back behaviour when no config file exists.
 ///
-/// Integration tests (Generate_ValidProject_*) require DX.Comply.Engine.dproj
-/// to be reachable at build\Win32\Debug\..\..\..\src\.
+/// Integration tests (Generate_ValidProject_*) load DX.Comply.Engine.dproj
+/// through RepoRoot in DX.Comply.Tests.Paths.
 /// </remarks>
 ///
 /// <copyright>
@@ -31,7 +31,8 @@ uses
   DX.Comply.BuildOrchestrator,
   DX.Comply.Engine,
   DX.Comply.Engine.Intf,
-  DX.Comply.Report.Intf;
+  DX.Comply.Report.Intf,
+  DX.Comply.VersionInfo;
 
 type
   /// <summary>
@@ -45,13 +46,28 @@ type
     FProgressMessages: TStringList;
     FProgressValues: TList<Integer>;
     /// <summary>
-    /// Absolute path to DX.Comply.Engine.dproj resolved from the test binary location.
+    /// Absolute path to DX.Comply.Engine.dproj, resolved by RepoRoot.
     /// </summary>
     FEngineDprojPath: string;
     /// <summary>
-    /// Progress callback – captures messages and percentage values for assertion.
+    /// Progress callback. Captures messages and percentage values for assertion.
     /// </summary>
     procedure OnProgress(const AMessage: string; const AProgress: Integer);
+    function CreateScopeProject(const AFolder: string; AWithOutputDir: Boolean): string;
+    function ScopeConfig: TSbomConfig;
+    function CountComponents(const AJson: TJSONObject; const AName: string): NativeInt;
+    function ComponentVersion(const AJson: TJSONObject; const AName: string): string;
+    function ComponentHasHash(const AJson: TJSONObject; const AName: string): Boolean;
+    function GenerateScope(const AProjectPath: string; const AConfig: TSbomConfig): TJSONObject;
+    /// <summary>
+    /// Temp project whose output is Debug\Win32. When APlaceVersionedDll is
+    /// true, a DLL with a version resource is copied to ADllRelativeDir.
+    /// An unrelated noise.dll is always placed under Installer\Dateien.
+    /// </summary>
+    function CreateVendorDllProject(const AFolder, ADllRelativeDir,
+      AReferencedName: string; APlaceVersionedDll: Boolean;
+      out ADllPath: string): string;
+    function GenerateVendorProject(const AProject: string): TJSONObject;
   public
     [Setup]
     procedure Setup;
@@ -72,7 +88,7 @@ type
     [Test]
     procedure ValidateProject_WrongExtension_ReturnsFalse;
 
-    // ---- Generate — failure path -------------------------------------------
+    // ---- Generate: failure path -------------------------------------------
 
     /// <summary>Generate with an invalid project path must return False.</summary>
     [Test]
@@ -82,7 +98,7 @@ type
     [Test]
     procedure Generate_InvalidProject_FiresNegativeProgress;
 
-    // ---- Generate — happy path (integration) --------------------------------
+    // ---- Generate: happy path (integration) --------------------------------
 
     /// <summary>Generate with the engine dproj must return True and write the output file.</summary>
     [Test]
@@ -92,15 +108,30 @@ type
     [Test]
     procedure Generate_ValidProject_FiresProgress100;
 
+    /// <summary>
+    /// The progress log names each build evidence item. A count alone hides
+    /// what was found. Issue #100.
+    /// </summary>
+    [Test]
+    procedure Generate_ListsBuildEvidenceItems;
+
     /// <summary>The generated file must contain valid CycloneDX JSON.</summary>
     [Test]
     procedure Generate_OutputFileContainsValidJson;
+
+    /// <summary>The generated SBOM tool version must match the running module.</summary>
+    [Test]
+    procedure Generate_ToolVersion_MatchesModule;
 
     /// <summary>The generated SBOM must include DX.Comply Deep-Evidence metadata properties.</summary>
     [Test]
     procedure Generate_OutputFileContainsDxComplyMetadataProperties;
 
-    /// <summary>The generated SBOM must also persist consolidated per-unit evidence in formal metadata.</summary>
+    /// <summary>
+    /// Unit-evidence library components for resolved files must include hashes.
+    /// Runtime packages and source-scanned DLLs are also type library and carry
+    /// an empty hash on purpose, so they are not part of this check.
+    /// </summary>
     [Test]
     procedure Generate_OutputFileContainsUnitEvidenceProperties;
 
@@ -155,10 +186,17 @@ type
 
     /// <summary>
     /// Generated SBOM must include runtime-package components when the
-    /// project declares runtime packages in the .dproj.
+    /// project links with runtime packages (UsePackages true).
     /// </summary>
     [Test]
     procedure Generate_ValidProject_ContainsRuntimePackageComponents;
+
+    /// <summary>
+    /// $(ProductVersion) output directories are written to the SBOM as the
+    /// directory that exists, with no leftover $(...) token.
+    /// </summary>
+    [Test]
+    procedure Generate_ProductVersionOutput_WritesResolvedPath;
 
     /// <summary>
     /// Generated SBOM must include external-reference components when
@@ -166,6 +204,93 @@ type
     /// </summary>
     [Test]
     procedure Generate_ValidProject_ContainsExternalDllComponents;
+
+    // ---- ResolveExternalDllFile (issue #59) ---------------------------------
+
+    /// <summary>A DLL next to the program is found in the output directory.</summary>
+    [Test]
+    procedure ResolveDll_InOutputDir_ReturnsOutputDirectory;
+    /// <summary>A full path given in code wins over the output directory.</summary>
+    [Test]
+    procedure ResolveDll_ExplicitPath_WinsOverOutputDir;
+    /// <summary>A missing explicit path falls back to the file name in the output directory.</summary>
+    [Test]
+    procedure ResolveDll_MissingExplicitPath_FallsBackToOutputDir;
+    /// <summary>The output directory is searched before the system directories.</summary>
+    [Test]
+    procedure ResolveDll_OutputDirBeforeSystemDir;
+    /// <summary>A DLL found only in a system directory reports dlsSystemDirectory.</summary>
+    [Test]
+    procedure ResolveDll_OnlyInSystemDir_ReturnsSystemDirectory;
+    /// <summary>A DLL that is nowhere returns an empty path and dlsNotFound.</summary>
+    [Test]
+    procedure ResolveDll_NotFound_ReturnsEmpty;
+    /// <summary>A name without extension is also tried with .dll.</summary>
+    [Test]
+    procedure ResolveDll_NoExtension_TriesDll;
+    /// <summary>
+    /// A DLL that exists only under Installer\Dateien is found in the project tree.
+    /// </summary>
+    [Test]
+    procedure ResolveDll_OnlyInInstaller_ReturnsProjectTree;
+    /// <summary>
+    /// Installer\Dateien wins over Installer\DateienKunde and over another project folder.
+    /// </summary>
+    [Test]
+    procedure ResolveDll_InstallerBeatsOtherCopies;
+    /// <summary>The output directory still wins over a copy under Installer.</summary>
+    [Test]
+    procedure ResolveDll_OutputDirBeforeProjectTree;
+    /// <summary>A named DLL in a non-Installer project folder is still found.</summary>
+    [Test]
+    procedure ResolveDll_OtherProjectFolder_ReturnsProjectTree;
+    /// <summary>A .bpl under Installer is found the same way as a DLL.</summary>
+    [Test]
+    procedure ResolveDll_BplInInstaller_ReturnsProjectTree;
+    /// <summary>The project walk stops at a fixed depth and does not leave the project.</summary>
+    [Test]
+    procedure ResolveDll_DepthAndProjectRoot_AreBounded;
+    /// <summary>
+    /// A DLL found only in a system directory stays a system hit when a project
+    /// directory is also supplied.
+    /// </summary>
+    [Test]
+    procedure ResolveDll_SystemDirectoryUnchangedWithProjectDir;
+    /// <summary>
+    /// With one copy per platform in the project tree, the copy whose PE
+    /// header names the target platform is returned.
+    /// </summary>
+    [Test]
+    procedure ResolveDll_PlatformCopies_TargetPlatformWins;
+    /// <summary>A copy for the target platform beats a copy for another platform under Installer.</summary>
+    [Test]
+    procedure ResolveDll_PlatformCopyBeatsInstallerOfOtherPlatform;
+    /// <summary>Without a platform the Installer order is the one used before.</summary>
+    [Test]
+    procedure ResolveDll_NoPlatform_KeepsInstallerOrder;
+    /// <summary>A single copy for another platform is still found.</summary>
+    [Test]
+    procedure ResolveDll_OnlyOtherPlatformCopy_IsStillFound;
+    /// <summary>
+    /// A referenced DLL that lives only under Installer\Dateien gets a PE
+    /// version and hashes. An unrelated DLL in that folder is not added.
+    /// </summary>
+    [Test]
+    procedure Generate_DllOnlyInInstaller_HasVersionAndHash;
+    /// <summary>A DLL that lives only in the output directory still gets a version and hashes.</summary>
+    [Test]
+    procedure Generate_DllOnlyInOutputDir_HasVersionAndHash;
+    /// <summary>
+    /// A DLL found only in a system directory still has a location and no hash.
+    /// </summary>
+    [Test]
+    procedure Generate_SystemDll_HasLocationButNoHash;
+    /// <summary>Non-Windows targets have no system directory.</summary>
+    [Test]
+    procedure SystemDirectories_NonWindowsPlatform_IsEmpty;
+    /// <summary>Win32 uses SysWOW64 on 64-bit Windows, Win64 uses System32.</summary>
+    [Test]
+    procedure SystemDirectories_Win32AndWin64_MatchBitness;
 
     // ---- ScanPasFilesForDllReferences (issue #24 regressions) ---------------
 
@@ -195,9 +320,305 @@ type
     /// </summary>
     [Test]
     procedure ScanPasFiles_ConstInOtherUnit_ResolvesViaGlobalFallback;
+
+    /// <summary>external 'kernel32.dll' must still be detected, and {$I+} must not be treated as an include.</summary>
+    [Test]
+    procedure ScanPasFiles_ExternalLiteral_DetectsDllName;
+
+    /// <summary>external DLLName must resolve a const in the same unit.</summary>
+    [Test]
+    procedure ScanPasFiles_ExternalIdentifier_ResolvesConst;
+
+    /// <summary>
+    /// The reported OPC UA stack pattern: the external declaration lives in
+    /// an include, and the DLL name const has two {$IFDEF} branches.
+    /// Both file names must be reported and marked conditional. Issue #45.
+    /// </summary>
+    [Test]
+    procedure ScanPasFiles_ExternalInInclude_IfdefConst_ResolvesBothNames;
+
+    /// <summary>
+    /// An include that is not next to the unit must still be found on the
+    /// search path. Issue #45.
+    /// </summary>
+    [Test]
+    procedure ScanPasFiles_IncludeOnSearchPath_ResolvesExternalDll;
+
+    /// <summary>LoadLibrary(CONST) inside an include must resolve a const declared in the including unit.</summary>
+    [Test]
+    procedure ScanPasFiles_LoadLibraryInInclude_ResolvesConst;
+
+    /// <summary>external NotADll must not be reported when the identifier is not a const.</summary>
+    [Test]
+    procedure ScanPasFiles_UnresolvedExternalIdent_IsIgnored;
+
+    // ---- .dxcomply.json loading (issue #50) --------------------------------
+
+    /// <summary>configName and platform keys are stored on the loaded config.</summary>
+    [Test]
+    procedure LoadConfig_ConfigNameAndPlatform;
+
+    /// <summary>
+    /// product.supplier keeps an ampersand, including a name with two of them.
+    /// </summary>
+    [Test]
+    procedure LoadConfig_SupplierWithAmpersand_StaysIntact;
+
+    /// <summary>
+    /// An spdxVersion the tool does not write is reported, and SPDX 2.3 is
+    /// used. A supported value gives no warning.
+    /// </summary>
+    [Test]
+    procedure LoadConfig_UnsupportedSpdxVersion_Warns;
+
+    /// <summary>
+    /// With composition evidence off, the third-party check still sees the
+    /// resolved units, so --strict cannot pass because they are hidden.
+    /// </summary>
+    [Test]
+    procedure ThirdPartyCheck_NoCompositionEvidence_StillSeesResolvedUnits;
+
+    /// <summary>A JSON array root must not raise and must keep defaults.</summary>
+    [Test]
+    procedure LoadConfig_NonObjectRoot_ReturnsDefaults;
+
+    /// <summary>
+    /// deepEvidence.build must not override deepEvidence.mode. The boolean
+    /// used to be dead code that always stored when-map-missing.
+    /// </summary>
+    [Test]
+    procedure LoadConfig_DeepEvidenceBuild_DoesNotOverrideMode;
+
+    /// <summary>
+    /// A file configName applies when the caller did not pass one explicitly.
+    /// </summary>
+    [Test]
+    procedure GenerateFromConfig_FileValues_ApplyWhenNotExplicit;
+
+    /// <summary>
+    /// Explicit caller fields win over the file. Omitted fields keep the file.
+    /// </summary>
+    [Test]
+    procedure GenerateFromConfig_ExplicitCaller_OverridesFile;
+
+    /// <summary>
+    /// --include-platform-in-output decorates the file output using the
+    /// merged platform and configuration, unless --output was explicit.
+    /// </summary>
+    [Test]
+    procedure GenerateFromConfig_IncludePlatformInOutput_DecoratesMergedOutput;
+
+    /// <summary>
+    /// outputDir places a bare file name in a relative or absolute directory.
+    /// A file path that already has a directory stays put (issue #146).
+    /// </summary>
+    [Test]
+    procedure ResolveSbomOutputPath_RelativeAndAbsoluteDirectory;
+
+    /// <summary>
+    /// CLI --output is a file path and is not placed in outputDir.
+    /// </summary>
+    [Test]
+    procedure ResolveSbomOutputPath_ExplicitFileWins;
+
+    /// <summary>
+    /// Platform decoration changes the file name and keeps outputDir.
+    /// An explicit file path is not decorated.
+    /// </summary>
+    [Test]
+    procedure ResolveSbomOutputPath_PlatformDecorationKeepsDirectory;
+
+    /// <summary>
+    /// A non-empty .dxcomply.json outputDir wins over the IDE options directory.
+    /// </summary>
+    [Test]
+    procedure ChooseOutputDirectory_ProjectFileWins;
+
+    /// <summary>
+    /// GenerateFromConfig applies outputDir to a bare name, keeps a file path
+    /// that already has a directory, and lets an explicit output win.
+    /// </summary>
+    [Test]
+    procedure GenerateFromConfig_OutputDir_MergesPath;
+
+    /// <summary>
+    /// outputDir receives bom.json and the reports when report.output is empty.
+    /// The directory is created when it is missing.
+    /// </summary>
+    [Test]
+    procedure GenerateFromConfig_OutputDir_WritesSbomAndReports;
+
+    /// <summary>The recursive output walk is off unless the caller opts in.</summary>
+    [Test]
+    procedure Config_Default_ScanTreeIsFalse;
+
+    // ---- Artefact scope (issue #38) ------------------------------------------
+
+    /// <summary>
+    /// Default generation lists the named output and binaries beside it,
+    /// and leaves setup\ and nested build folders out.
+    /// </summary>
+    [Test]
+    procedure Generate_OutputScope_ListsNamedOutputAndSiblingsOnly;
+
+    /// <summary>
+    /// The named output stays in the SBOM when the file is missing, without a hash.
+    /// </summary>
+    [Test]
+    procedure Generate_OutputScope_MissingNamedFile_HasNoHash;
+
+    /// <summary>
+    /// Runtime packages and external DLLs are still components when the scan
+    /// did not find those files.
+    /// </summary>
+    [Test]
+    procedure Generate_OutputScope_KeepsDeclaredDependencies;
+
+    /// <summary>Exclude globs still filter scanned binaries.</summary>
+    [Test]
+    procedure Generate_OutputScope_ExcludeFiltersScannedFiles;
+
+    /// <summary>
+    /// --scan-dir / scanDirs is not recursive unless the value contains **.
+    /// </summary>
+    [Test]
+    procedure Generate_OutputScope_ScanDirRespectsRecursion;
+
+    /// <summary>
+    /// scanTree walks the output directory recursively and is reported as deprecated.
+    /// </summary>
+    [Test]
+    procedure Generate_OutputScope_ScanTreeWalksOutputDirectory;
+
+    /// <summary>
+    /// With no DCC_ExeOutput, the project directory is scanned non-recursively.
+    /// </summary>
+    [Test]
+    procedure Generate_OutputScope_ProjectDirFallbackSkipsSubfolders;
+
+    /// <summary>A package is scanned from the BPL directory, not DCC_ExeOutput.</summary>
+    [Test]
+    procedure Generate_OutputScope_PackageUsesBplDirectory;
+
+    /// <summary>scanDirs in .dxcomply.json adds that directory.</summary>
+    [Test]
+    procedure GenerateFromConfig_ScanDirs_AddsStagedBinaries;
+
+    /// <summary>scanTree in .dxcomply.json restores the recursive walk.</summary>
+    [Test]
+    procedure GenerateFromConfig_ScanTree_RestoresRecursiveWalk;
+
+    /// <summary>
+    /// A third-party EXE beside the project output keeps its own version
+    /// resource, or n/a when it has none. The project version stays on the
+    /// primary EXE. Issue #96.
+    /// </summary>
+    [Test]
+    procedure Generate_NeighborExe_UsesOwnVersionOrNa;
+
+    /// <summary>
+    /// A MAP file plus the unit sources, through Generate, writes UnitA to
+    /// UnitB to UnitC. The program depends on UnitA.
+    /// </summary>
+    [Test]
+    procedure Generate_MapUsesGraph_IsMultiLevel;
+
+    /// <summary>
+    /// Library mode, through Generate, writes the same chain for shipped
+    /// Pascal files. The library depends on the program, not on every file.
+    /// </summary>
+    [Test]
+    procedure GenerateLibrary_UsesGraph_IsMultiLevel;
+
+  end;
+
+  /// <summary>Build mode file components carry the product version.</summary>
+  [TestFixture]
+  TBuildFileVersionTests = class
+  public
+    [Test]
+    procedure Apply_ScannedFiles_GetProductVersion;
+    [Test]
+    procedure Apply_NonProductArtefacts_Unchanged;
+    [Test]
+    procedure Apply_ExistingVersion_Kept;
+    [Test]
+    procedure Apply_EmptyVersion_ChangesNothing;
+    [Test]
+    procedure GetFileVersionText_SystemDll_ReturnsVersion;
+    [Test]
+    procedure GetFileVersionText_NoResource_ReturnsEmpty;
+    [Test]
+    procedure GetFileVersionText_MissingFile_ReturnsEmpty;
+    [Test]
+    procedure Apply_ThirdPartyDll_GetsOwnVersion;
+    [Test]
+    procedure Apply_ResolvedExternalDll_GetsOwnVersion;
+    [Test]
+    procedure Apply_DllWithoutResource_GetsNoVersion;
+    [Test]
+    procedure Apply_OwnOutputDll_GetsProductVersion;
+    [Test]
+    procedure Apply_ThirdPartyBpl_GetsOwnVersion;
+    [Test]
+    procedure Apply_BplWithoutResource_GetsNoVersion;
+    [Test]
+    procedure Apply_OwnOutputBpl_GetsProductVersion;
+    /// <summary>
+    /// When no product version is set, an application EXE still on disk gets
+    /// its PE FileVersion so the report and CycloneDX stay aligned. Issue #90.
+    /// </summary>
+    [Test]
+    procedure Apply_ExeWithoutProductVersion_GetsPeVersion;
+    /// <summary>
+    /// The primary build EXE keeps the project version when that file has no
+    /// PE version resource. Issue #96.
+    /// </summary>
+    [Test]
+    procedure Apply_PrimaryExe_KeepsProjectVersion;
+    /// <summary>
+    /// The primary build EXE keeps the project version when its PE version
+    /// resource says something else. Issue #96.
+    /// </summary>
+    [Test]
+    procedure Apply_PrimaryExeWithVersion_KeepsProjectVersion;
+    /// <summary>
+    /// An EXE beside the primary output, with no version resource, gets no
+    /// version. The report shows that as n/a. Issue #96.
+    /// </summary>
+    [Test]
+    procedure Apply_NeighborExeWithoutVersion_GetsNoVersion;
+    /// <summary>
+    /// An EXE beside the primary output keeps the FileVersion from its own
+    /// version resource. Issue #96.
+    /// </summary>
+    [Test]
+    procedure Apply_NeighborExeWithVersion_KeepsOwnVersion;
+    /// <summary>A real version never sets VersionFromFileDate. Issue #109.</summary>
+    [Test]
+    procedure Apply_ProductVersion_NotFromFileDate;
+    /// <summary>A system DLL (Location set) gets no file date version. Issue #109.</summary>
+    [Test]
+    procedure Apply_SystemLocationDll_GetsNoFileDate;
+    /// <summary>A resource file on disk gets its file date as version. Issue #109.</summary>
+    [Test]
+    procedure Apply_ResourceOnDisk_GetsFileDate;
+    /// <summary>A third-party .dcp does not take the product version.</summary>
+    [Test]
+    procedure Apply_ThirdPartyDcp_NoProductVersion;
+    /// <summary>FormatRfc3339Utc writes YYYY-MM-DDThh:mm:ssZ.</summary>
+    [Test]
+    procedure FormatRfc3339Utc_Format;
   end;
 
 implementation
+
+uses
+  Winapi.Windows,
+  System.DateUtils,
+  System.RegularExpressions,
+  DX.Comply.BuildEvidence.Intf,
+  DX.Comply.Tests.Paths;
 
 { TEngineTests }
 
@@ -214,13 +635,10 @@ begin
   FProgressMessages := TStringList.Create;
   FProgressValues   := TList<Integer>.Create;
 
-  // Resolve path to the engine dproj fixture.
-  // Test binary is placed in: build\<Platform>\<Config>\
-  // Engine dproj is at:       src\DX.Comply.Engine.dproj
-  FEngineDprojPath := TPath.GetFullPath(
-    TPath.Combine(TPath.GetDirectoryName(ParamStr(0)),
-      '..' + PathDelim + '..' + PathDelim + '..' + PathDelim +
-      'src' + PathDelim + 'DX.Comply.Engine.dproj'));
+  // Engine dproj is at <repo>\src\DX.Comply.Engine.dproj. RepoRoot finds the
+  // checkout when the executable is outside build\(platform)\(config)\.
+  FEngineDprojPath := TPath.Combine(RepoRoot,
+    'src' + PathDelim + 'DX.Comply.Engine.dproj');
 end;
 
 procedure TEngineTests.TearDown;
@@ -281,7 +699,7 @@ begin
   end;
 end;
 
-// ---- Generate — failure path ------------------------------------------------
+// ---- Generate: failure path ------------------------------------------------
 
 procedure TEngineTests.Generate_InvalidProject_ReturnsFalse;
 var
@@ -313,7 +731,7 @@ begin
   end;
 end;
 
-// ---- Generate — happy path (integration) ------------------------------------
+// ---- Generate: happy path (integration) ------------------------------------
 
 procedure TEngineTests.Generate_ValidProject_WritesFile;
 var
@@ -347,6 +765,28 @@ begin
   end;
 end;
 
+procedure TEngineTests.Generate_ListsBuildEvidenceItems;
+var
+  LGen: TDxComplyGenerator;
+  LText: string;
+begin
+  LGen := TDxComplyGenerator.Create;
+  try
+    LGen.OnProgress := OnProgress;
+    Assert.IsTrue(LGen.Generate(FEngineDprojPath, FOutputFile),
+      'Generate must succeed so the evidence log is produced');
+    LText := FProgressMessages.Text;
+    Assert.IsTrue(Pos('build evidence item(s):', LText) > 0,
+      'The log must keep the evidence count: ' + LText);
+    Assert.IsTrue(Pos('Project metadata', LText) > 0,
+      'The log must name the project metadata evidence item: ' + LText);
+    Assert.IsTrue(Pos('Expected map file', LText) > 0,
+      'The log must name the expected map file: ' + LText);
+  finally
+    LGen.Free;
+  end;
+end;
+
 procedure TEngineTests.Generate_OutputFileContainsValidJson;
 var
   LGen: TDxComplyGenerator;
@@ -365,6 +805,33 @@ begin
       Assert.IsNotNull(LJson, 'Output file must contain valid parseable JSON');
       Assert.AreEqual('CycloneDX', LJson.GetValue<string>('bomFormat'),
         'bomFormat must be CycloneDX');
+    finally
+      LJson.Free;
+    end;
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_ToolVersion_MatchesModule;
+var
+  LComponents: TJSONArray;
+  LGen: TDxComplyGenerator;
+  LJson, LMetadata, LTool, LTools: TJSONObject;
+begin
+  LGen := TDxComplyGenerator.Create;
+  try
+    LGen.OnProgress := OnProgress;
+    Assert.IsTrue(LGen.Generate(FEngineDprojPath, FOutputFile),
+      'Generate must succeed before the tool version can be checked');
+    LJson := TJSONObject.ParseJSONValue(TFile.ReadAllText(FOutputFile, TEncoding.UTF8)) as TJSONObject;
+    try
+      LMetadata := LJson.GetValue('metadata') as TJSONObject;
+      LTools := LMetadata.GetValue('tools') as TJSONObject;
+      LComponents := LTools.GetValue('components') as TJSONArray;
+      LTool := LComponents.Items[0] as TJSONObject;
+      Assert.AreEqual(GetDxComplyToolVersion, LTool.GetValue<string>('version'),
+        'The generated SBOM tool version must match the running module');
     finally
       LJson.Free;
     end;
@@ -420,9 +887,9 @@ begin
         'DX.Comply BOM metadata properties must be present on metadata.properties');
       Assert.IsNotNull(LComponentProperties,
         'DX.Comply component metadata properties must be present on metadata.component.properties');
-      Assert.IsTrue(FindPropertyValue(LBomProperties,
-        'net.developer-experts.dx-comply:document.profile') <> '',
-        'BOM must contain the document profile property');
+      Assert.AreEqual('build-evidence', FindPropertyValue(LBomProperties,
+        'net.developer-experts.dx-comply:document.profile'),
+        'BOM document profile must name the build evidence');
       Assert.AreEqual('Release', FindPropertyValue(LComponentProperties,
         'net.developer-experts.dx-comply:build.configuration'));
       Assert.AreEqual('Win32', FindPropertyValue(LComponentProperties,
@@ -436,16 +903,69 @@ begin
 end;
 
 procedure TEngineTests.Generate_OutputFileContainsUnitEvidenceProperties;
+const
+  cEvidenceProperty = 'net.developer-experts.dx-comply:evidence';
+  cConfidenceProperty = 'net.developer-experts.dx-comply:confidence';
+  cFileSizeProperty = 'file:size';
 var
   LComponents: TJSONArray;
   LComponentObj: TJSONObject;
   LConfig: TSbomConfig;
   LGen: TDxComplyGenerator;
   LContent: string;
+  LHashObj: TJSONObject;
+  LHashes: TJSONArray;
   LJson: TJSONObject;
-  LFoundLibrary: Boolean;
+  LName: string;
   LTestsDprojPath: string;
+  LUnitEvidenceCount: Integer;
   I: Integer;
+
+  function PropertyValue(const AComponent: TJSONObject; const AName: string): string;
+  var
+    J: Integer;
+    LProperties: TJSONArray;
+    LProperty: TJSONObject;
+  begin
+    Result := '';
+    LProperties := AComponent.GetValue('properties') as TJSONArray;
+    if not Assigned(LProperties) then
+      Exit;
+
+    for J := 0 to LProperties.Count - 1 do
+    begin
+      if not (LProperties.Items[J] is TJSONObject) then
+        Continue;
+      LProperty := TJSONObject(LProperties.Items[J]);
+      if SameText(LProperty.GetValue<string>('name', ''), AName) then
+        Exit(LProperty.GetValue<string>('value', ''));
+    end;
+  end;
+
+  function IsUnitEvidence(const AComponent: TJSONObject): Boolean;
+  var
+    LConfidence: string;
+    LEvidence: string;
+  begin
+    Result := False;
+    if not SameText(AComponent.GetValue<string>('type', ''), 'library') then
+      Exit;
+
+    LEvidence := PropertyValue(AComponent, cEvidenceProperty);
+    if LEvidence = '' then
+      Exit;
+
+    // Runtime packages are declared BPLs. Source-scanned DLLs use confidence
+    // Source-scan. Both are type library and have an empty hash on purpose.
+    LConfidence := PropertyValue(AComponent, cConfidenceProperty);
+    if SameText(LConfidence, 'Source-scan') then
+      Exit;
+    if SameText(LEvidence, 'BPL') and SameText(LConfidence, 'Declared') then
+      Exit;
+
+    Result := True;
+  end;
+
 begin
   LTestsDprojPath := TPath.Combine(
     TPath.GetDirectoryName(TPath.GetDirectoryName(FEngineDprojPath)),
@@ -473,21 +993,31 @@ begin
       Assert.IsTrue(LComponents.Count > 1,
         'SBOM must contain more than just the primary artefact');
 
-      LFoundLibrary := False;
+      LUnitEvidenceCount := 0;
       for I := 0 to LComponents.Count - 1 do
       begin
         LComponentObj := LComponents.Items[I] as TJSONObject;
-        if LComponentObj.GetValue<string>('type') = 'library' then
-        begin
-          LFoundLibrary := True;
-          Assert.IsTrue(LComponentObj.GetValue('hashes') <> nil,
-            'Library components must include hashes');
-          Break;
-        end;
+        if not IsUnitEvidence(LComponentObj) then
+          Continue;
+
+        Inc(LUnitEvidenceCount);
+        // file:size is written only when the resolved file was present on disk.
+        if PropertyValue(LComponentObj, cFileSizeProperty) = '' then
+          Continue;
+
+        LName := LComponentObj.GetValue<string>('name', '');
+        LHashes := LComponentObj.GetValue('hashes') as TJSONArray;
+        Assert.IsNotNull(LHashes,
+          'Unit-evidence component "' + LName + '" must include hashes');
+        Assert.IsTrue(LHashes.Count > 0,
+          'Unit-evidence component "' + LName + '" must include a hash value');
+        LHashObj := LHashes.Items[0] as TJSONObject;
+        Assert.IsTrue(Trim(LHashObj.GetValue<string>('content', '')) <> '',
+          'Unit-evidence component "' + LName + '" must include a non-empty hash');
       end;
 
-      Assert.IsTrue(LFoundLibrary,
-        'SBOM must contain library components for resolved unit evidence');
+      Assert.IsTrue(LUnitEvidenceCount > 0,
+        'SBOM must contain at least one unit-evidence library component');
     finally
       LJson.Free;
     end;
@@ -614,6 +1144,8 @@ begin
   LConfig := TSbomConfig.Default;
   Assert.AreEqual('bom.json', LConfig.OutputPath,
     'TSbomConfig.Default.OutputPath must be ''bom.json''');
+  Assert.AreEqual('', LConfig.OutputDir,
+    'TSbomConfig.Default.OutputDir must be empty');
 end;
 
 procedure TEngineTests.Config_Default_DeepEvidenceBuildWhenMapMissing;
@@ -731,38 +1263,74 @@ end;
 
 procedure TEngineTests.Generate_ValidProject_ContainsRuntimePackageComponents;
 var
-  LConfig: TSbomConfig;
-  LGen: TDxComplyGenerator;
-  LContent: string;
-  LJson: TJSONObject;
+  LComponent: TJSONObject;
   LComponents: TJSONArray;
-  LComponent, LProp: TJSONObject;
-  LProperties: TJSONArray;
+  LConfig: TSbomConfig;
+  LContent: string;
   LFoundRuntimePackage: Boolean;
+  LGen: TDxComplyGenerator;
+  LJson: TJSONObject;
+  LProject: string;
+  LProp: TJSONObject;
+  LProperties: TJSONArray;
+  LRoot: string;
   I, J: Integer;
 begin
+  // The engine .dproj lists DCC_UsePackage and does not set UsePackages, so
+  // it must not contribute runtime packages. This fixture links rtl.
+  LRoot := TPath.Combine(FTempDir, 'rtlpkg');
+  TDirectory.CreateDirectory(LRoot);
+  TDirectory.CreateDirectory(TPath.Combine(LRoot, 'out'));
+  TFile.WriteAllText(TPath.Combine(LRoot, 'RtApp.dpr'),
+    'program RtApp;' + sLineBreak + 'begin' + sLineBreak + 'end.' + sLineBreak,
+    TEncoding.UTF8);
+  TFile.WriteAllText(TPath.Combine(LRoot, 'RtApp.dproj'),
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>RtApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Console</AppType>' + sLineBreak +
+    '    <TargetedPlatforms>1</TargetedPlatforms>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+    '    <DCC_ExeOutput>.\out</DCC_ExeOutput>' + sLineBreak +
+    '    <UsePackages>true</UsePackages>' + sLineBreak +
+    '    <DCC_UsePackage>rtl</DCC_UsePackage>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>' + sLineBreak, TEncoding.UTF8);
+  // Not a valid PE, so the import filter keeps the UsePackages list.
+  // The map file skips the Deep-Evidence build.
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'out', 'RtApp.exe'),
+    TBytes.Create($4D, $5A, $01));
+  TFile.WriteAllText(TPath.Combine(LRoot, 'out', 'RtApp.map'), 'map', TEncoding.UTF8);
+  LProject := TPath.Combine(LRoot, 'RtApp.dproj');
+
   LConfig := TSbomConfig.Default;
   LConfig.OutputPath := FOutputFile;
-  LConfig.Configuration := 'Debug';
+  LConfig.Configuration := 'Release';
   LConfig.Platform := 'Win32';
+  LConfig.IncludeCompositionEvidence := False;
 
   LGen := TDxComplyGenerator.Create(LConfig);
   try
     LGen.OnProgress := OnProgress;
-    // Use the engine dproj which has runtime packages
-    Assert.IsTrue(LGen.Generate(FEngineDprojPath, FOutputFile, sfCycloneDxJson),
-      'Generate must succeed');
+    Assert.IsTrue(LGen.Generate(LProject, FOutputFile, sfCycloneDxJson),
+      'Generate must succeed. Progress: ' + FProgressMessages.Text);
 
     LContent := TFile.ReadAllText(FOutputFile, TEncoding.UTF8);
     LJson := TJSONObject.ParseJSONValue(LContent) as TJSONObject;
     try
       LComponents := LJson.GetValue('components') as TJSONArray;
       Assert.IsNotNull(LComponents, 'SBOM must contain components');
+      Assert.AreEqual(NativeInt(1), NativeInt(CountComponents(LJson, 'rtl.bpl')),
+        'The linked runtime package must be a component');
 
       LFoundRuntimePackage := False;
       for I := 0 to LComponents.Count - 1 do
       begin
         LComponent := LComponents.Items[I] as TJSONObject;
+        if not SameText(LComponent.GetValue<string>('name', ''), 'rtl.bpl') then
+          Continue;
         LProperties := LComponent.GetValue('properties') as TJSONArray;
         if not Assigned(LProperties) then
           Continue;
@@ -776,17 +1344,149 @@ begin
             Break;
           end;
         end;
-        if LFoundRuntimePackage then
-          Break;
       end;
 
       Assert.IsTrue(LFoundRuntimePackage,
-        'SBOM must contain at least one runtime-package component with evidence=BPL');
+        'SBOM must contain a runtime-package component with evidence=BPL');
     finally
       LJson.Free;
     end;
   finally
     LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_ProductVersionOutput_WritesResolvedPath;
+var
+  LBdsRoot: string;
+  LComponent: TJSONObject;
+  LConfig: TSbomConfig;
+  LDcpDir: string;
+  LDcuDir: string;
+  LExeDir: string;
+  LGen: TDxComplyGenerator;
+  LJson: TJSONObject;
+  LMeta: TJSONObject;
+  LPreviousBds: string;
+  LProject: string;
+  LProperties: TJSONArray;
+  LRoot: string;
+  LBplDir: string;
+
+  function FindPropertyValue(const AProperties: TJSONArray; const AName: string): string;
+  var
+    I: Integer;
+    LProperty: TJSONObject;
+  begin
+    Result := '';
+    if not Assigned(AProperties) then
+      Exit;
+    for I := 0 to AProperties.Count - 1 do
+    begin
+      if not (AProperties.Items[I] is TJSONObject) then
+        Continue;
+      LProperty := TJSONObject(AProperties.Items[I]);
+      if SameText(LProperty.GetValue<string>('name', ''), AName) then
+        Exit(LProperty.GetValue<string>('value', ''));
+    end;
+  end;
+
+  procedure ExpectResolved(const AValue, AFolder: string);
+  var
+    LSuffix: string;
+  begin
+    LSuffix := '\' + AFolder;
+    Assert.IsTrue((Length(AValue) >= Length(LSuffix)) and
+      (Copy(AValue, Length(AValue) - Length(LSuffix) + 1, Length(LSuffix)) = LSuffix),
+      AFolder + ' must be the resolved directory, but was: ' + AValue);
+    Assert.IsTrue(Pos('$(', AValue) = 0,
+      AFolder + ' must contain no $( token: ' + AValue);
+  end;
+begin
+  LPreviousBds := System.SysUtils.GetEnvironmentVariable('BDS');
+  LRoot := TPath.Combine(FTempDir, 'pv');
+  TDirectory.CreateDirectory(LRoot);
+  LBdsRoot := TPath.Combine(FTempDir, 'bds', '37.0');
+  ForceDirectories(LBdsRoot);
+  LExeDir := TPath.Combine(LRoot, 'Compiled', 'BIN_IDE_Win32_Release');
+  LDcuDir := TPath.Combine(LRoot, 'Compiled', 'DCU_IDE_Win32_Release');
+  LDcpDir := TPath.Combine(LRoot, 'Compiled', 'DCP_IDE_Win32_Release');
+  LBplDir := TPath.Combine(LRoot, 'Compiled', 'BPL_IDE_Win32_Release');
+  ForceDirectories(LExeDir);
+  ForceDirectories(LDcuDir);
+  ForceDirectories(LDcpDir);
+  ForceDirectories(LBplDir);
+  try
+    Winapi.Windows.SetEnvironmentVariable(PChar('BDS'), PChar(LBdsRoot));
+    TFile.WriteAllText(TPath.Combine(LRoot, 'PvApp.dpr'),
+      'program PvApp;' + sLineBreak + 'begin' + sLineBreak + 'end.' + sLineBreak,
+      TEncoding.UTF8);
+    TFile.WriteAllText(TPath.Combine(LExeDir, 'PvApp.map'), 'map', TEncoding.UTF8);
+    LProject := TPath.Combine(LRoot, 'PvApp.dproj');
+    TFile.WriteAllText(LProject,
+      '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+      '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+      '  <PropertyGroup>' + sLineBreak +
+      '    <MainSource>PvApp.dpr</MainSource>' + sLineBreak +
+      '    <AppType>Console</AppType>' + sLineBreak +
+      '    <TargetedPlatforms>1</TargetedPlatforms>' + sLineBreak +
+      '  </PropertyGroup>' + sLineBreak +
+      '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+      '    <DCC_ExeOutput>.\Compiled\BIN_IDE$(ProductVersion)_$(Platform)_$(Config)</DCC_ExeOutput>' + sLineBreak +
+      '    <DCC_DcuOutput>.\Compiled\DCU_IDE$(ProductVersion)_$(Platform)_$(Config)</DCC_DcuOutput>' + sLineBreak +
+      '    <DCC_DcpOutput>.\Compiled\DCP_IDE$(BDSVER)_$(Platform)_$(Config)</DCC_DcpOutput>' + sLineBreak +
+      '    <DCC_BplOutput>.\Compiled\BPL_IDE$(BDSVersion)_$(Platform)_$(Config)</DCC_BplOutput>' + sLineBreak +
+      '  </PropertyGroup>' + sLineBreak +
+      '</Project>' + sLineBreak, TEncoding.UTF8);
+
+    LConfig := TSbomConfig.Default;
+    LConfig.OutputPath := FOutputFile;
+    LConfig.Configuration := 'Release';
+    LConfig.Platform := 'Win32';
+    LConfig.IncludeCompositionEvidence := False;
+
+    FProgressMessages.Clear;
+    LGen := TDxComplyGenerator.Create(LConfig);
+    try
+      LGen.OnProgress := OnProgress;
+      Assert.IsTrue(LGen.Generate(LProject, FOutputFile, sfCycloneDxJson),
+        'Generate must succeed. Progress: ' + FProgressMessages.Text);
+    finally
+      LGen.Free;
+    end;
+
+    LJson := TJSONObject.ParseJSONValue(
+      TFile.ReadAllText(FOutputFile, TEncoding.UTF8)) as TJSONObject;
+    try
+      LMeta := LJson.GetValue('metadata') as TJSONObject;
+      LComponent := LMeta.GetValue('component') as TJSONObject;
+      LProperties := LComponent.GetValue('properties') as TJSONArray;
+      ExpectResolved(FindPropertyValue(LProperties,
+        'net.developer-experts.dx-comply:build.output-dir'),
+        'BIN_IDE_Win32_Release');
+      ExpectResolved(FindPropertyValue(LProperties,
+        'net.developer-experts.dx-comply:build.dcu-output-dir'),
+        'DCU_IDE_Win32_Release');
+      ExpectResolved(FindPropertyValue(LProperties,
+        'net.developer-experts.dx-comply:build.dcp-output-dir'),
+        'DCP_IDE_Win32_Release');
+      ExpectResolved(FindPropertyValue(LProperties,
+        'net.developer-experts.dx-comply:build.bpl-output-dir'),
+        'BPL_IDE_Win32_Release');
+    finally
+      LJson.Free;
+    end;
+
+    Assert.IsTrue(Pos('left empty', FProgressMessages.Text) > 0,
+      'Verbose progress must say the empty ProductVersion directory was used: ' +
+      FProgressMessages.Text);
+    Assert.IsTrue(Pos('DCC_ExeOutput', FProgressMessages.Text) > 0,
+      'Verbose progress must name the output directory: ' + FProgressMessages.Text);
+  finally
+    if LPreviousBds = '' then
+      Winapi.Windows.SetEnvironmentVariable(PChar('BDS'), nil)
+    else
+      Winapi.Windows.SetEnvironmentVariable(PChar('BDS'), PChar(LPreviousBds));
   end;
 end;
 
@@ -842,7 +1542,7 @@ begin
 
       // Note: This test may not find external DLL refs in the Engine package
       // itself since it's pure Delphi code. The assertion is intentionally
-      // soft — we verify the pipeline runs without error. A project with
+      // soft: we verify the pipeline runs without error. A project with
       // external declarations would produce components.
       Assert.WillNotRaise(
         procedure begin end,
@@ -854,6 +1554,576 @@ begin
   finally
     LGen.Free;
   end;
+end;
+
+// ---- ResolveExternalDllFile (issue #59) ------------------------------------
+
+function MakeDummyDll(const ADir, AName: string): string;
+begin
+  TDirectory.CreateDirectory(ADir);
+  Result := TPath.Combine(ADir, AName);
+  TFile.WriteAllText(Result, 'MZ dummy ' + AName);
+end;
+
+procedure TEngineTests.ResolveDll_InOutputDir_ReturnsOutputDirectory;
+var
+  LOutDir, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LOutDir := TPath.Combine(FTempDir, 'out');
+  LExpected := MakeDummyDll(LOutDir, 'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOutDir,
+    [], LSource);
+  Assert.AreEqual(Ord(dlsOutputDirectory), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+procedure TEngineTests.ResolveDll_ExplicitPath_WinsOverOutputDir;
+var
+  LOutDir, LExplicit, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LOutDir := TPath.Combine(FTempDir, 'out');
+  MakeDummyDll(LOutDir, 'vendor.dll');
+  LExplicit := MakeDummyDll(TPath.Combine(FTempDir, 'explicit'), 'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile(LExplicit, LOutDir,
+    [], LSource);
+  Assert.AreEqual(Ord(dlsExplicitPath), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExplicit), LResult), LResult);
+end;
+
+procedure TEngineTests.ResolveDll_MissingExplicitPath_FallsBackToOutputDir;
+var
+  LOutDir, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LOutDir := TPath.Combine(FTempDir, 'out');
+  LExpected := MakeDummyDll(LOutDir, 'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile(
+    TPath.Combine(FTempDir, 'missing\vendor.dll'), LOutDir, [], LSource);
+  Assert.AreEqual(Ord(dlsOutputDirectory), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+procedure TEngineTests.ResolveDll_OutputDirBeforeSystemDir;
+var
+  LOutDir, LSysDir, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LOutDir := TPath.Combine(FTempDir, 'out');
+  LSysDir := TPath.Combine(FTempDir, 'sys');
+  MakeDummyDll(LOutDir, 'vendor.dll');
+  MakeDummyDll(LSysDir, 'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOutDir,
+    [LSysDir], LSource);
+  Assert.AreEqual(Ord(dlsOutputDirectory), Ord(LSource));
+end;
+
+procedure TEngineTests.ResolveDll_OnlyInSystemDir_ReturnsSystemDirectory;
+var
+  LOutDir, LSysDir, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LOutDir := TPath.Combine(FTempDir, 'out');
+  TDirectory.CreateDirectory(LOutDir);
+  LSysDir := TPath.Combine(FTempDir, 'sys');
+  LExpected := MakeDummyDll(LSysDir, 'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOutDir,
+    [LSysDir], LSource);
+  Assert.AreEqual(Ord(dlsSystemDirectory), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+procedure TEngineTests.ResolveDll_NotFound_ReturnsEmpty;
+var
+  LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('no_such_dll_59.dll',
+    TPath.Combine(FTempDir, 'out'), [TPath.Combine(FTempDir, 'sys')], LSource);
+  Assert.AreEqual(Ord(dlsNotFound), Ord(LSource));
+  Assert.AreEqual('', LResult);
+end;
+
+procedure TEngineTests.ResolveDll_NoExtension_TriesDll;
+var
+  LOutDir, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LOutDir := TPath.Combine(FTempDir, 'out');
+  MakeDummyDll(LOutDir, 'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor', LOutDir,
+    [], LSource);
+  Assert.AreEqual(Ord(dlsOutputDirectory), Ord(LSource));
+  Assert.IsTrue(LResult.EndsWith('vendor.dll', True), LResult);
+end;
+
+function TEngineTests.CreateVendorDllProject(const AFolder, ADllRelativeDir,
+  AReferencedName: string; APlaceVersionedDll: Boolean;
+  out ADllPath: string): string;
+var
+  LRoot, LOut, LSource, LNoise: string;
+begin
+  ADllPath := '';
+  LRoot := TPath.Combine(FTempDir, AFolder);
+  TDirectory.CreateDirectory(LRoot);
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win32');
+  TDirectory.CreateDirectory(LOut);
+  TFile.WriteAllText(TPath.Combine(LRoot, 'VendorApp.dpr'),
+    'program VendorApp;' + sLineBreak +
+    'procedure UseDll; external ''' + AReferencedName + ''';' + sLineBreak +
+    'begin' + sLineBreak +
+    'end.' + sLineBreak, TEncoding.UTF8);
+  TFile.WriteAllText(TPath.Combine(LRoot, 'VendorApp.dproj'),
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>VendorApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+    '    <DCC_ExeOutput>.\Debug\Win32</DCC_ExeOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>' + sLineBreak, TEncoding.UTF8);
+  TFile.WriteAllBytes(TPath.Combine(LOut, 'VendorApp.exe'), TBytes.Create($4D, $5A, $01));
+  TFile.WriteAllText(TPath.Combine(LOut, 'VendorApp.map'), 'map', TEncoding.UTF8);
+
+  LNoise := TPath.Combine(TPath.Combine(TPath.Combine(LRoot, 'Installer'), 'Dateien'),
+    'noise.dll');
+  TDirectory.CreateDirectory(TPath.GetDirectoryName(LNoise));
+  TFile.WriteAllText(LNoise, 'MZ noise', TEncoding.UTF8);
+
+  if APlaceVersionedDll then
+  begin
+    LSource := TPath.Combine(GetEnvironmentVariable('SystemRoot'),
+      'System32\kernel32.dll');
+    Assert.IsTrue(TFile.Exists(LSource),
+      'kernel32.dll is required so the fixture has a version resource');
+    ADllPath := TPath.Combine(TPath.Combine(LRoot, ADllRelativeDir), AReferencedName);
+    TDirectory.CreateDirectory(TPath.GetDirectoryName(ADllPath));
+    TFile.Copy(LSource, ADllPath, True);
+  end;
+  Result := TPath.Combine(LRoot, 'VendorApp.dproj');
+end;
+
+function TEngineTests.GenerateVendorProject(const AProject: string): TJSONObject;
+var
+  LConfig: TSbomConfig;
+  LGen: TDxComplyGenerator;
+begin
+  LConfig := ScopeConfig;
+  FProgressMessages.Clear;
+  LGen := TDxComplyGenerator.Create(LConfig);
+  try
+    LGen.OnProgress := OnProgress;
+    Assert.IsTrue(LGen.Generate(AProject, FOutputFile, sfCycloneDxJson),
+      'Generate must succeed. Progress: ' + FProgressMessages.Text);
+    Result := TJSONObject.ParseJSONValue(
+      TFile.ReadAllText(FOutputFile, TEncoding.UTF8)) as TJSONObject;
+    Assert.IsNotNull(Result, 'SBOM must be JSON');
+  finally
+    LGen.Free;
+  end;
+end;
+
+function VendorProperty(const AComponent: TJSONObject; const AName: string): string;
+var
+  LProperties: TJSONArray;
+  LProperty: TJSONObject;
+  I: Integer;
+begin
+  Result := '';
+  if not Assigned(AComponent) then
+    Exit;
+  LProperties := AComponent.GetValue('properties') as TJSONArray;
+  if not Assigned(LProperties) then
+    Exit;
+  for I := 0 to LProperties.Count - 1 do
+  begin
+    if not (LProperties.Items[I] is TJSONObject) then
+      Continue;
+    LProperty := TJSONObject(LProperties.Items[I]);
+    if SameText(LProperty.GetValue<string>('name', ''), AName) then
+      Exit(LProperty.GetValue<string>('value', ''));
+  end;
+end;
+
+procedure AssertShippedDllEvidence(const AJson: TJSONObject; const AName, AVersion,
+  ASize: string);
+var
+  LComponents: TJSONArray;
+  LComponent: TJSONObject;
+  LHashes: TJSONArray;
+  LFound: Integer;
+  I: Integer;
+begin
+  Assert.IsNotNull(AJson, 'SBOM must be JSON');
+  LComponents := AJson.GetValue('components') as TJSONArray;
+  Assert.IsNotNull(LComponents, 'SBOM must contain components');
+  LFound := 0;
+  for I := 0 to LComponents.Count - 1 do
+  begin
+    if not (LComponents.Items[I] is TJSONObject) then
+      Continue;
+    LComponent := TJSONObject(LComponents.Items[I]);
+    if not SameText(LComponent.GetValue<string>('name', ''), AName) then
+      Continue;
+    Inc(LFound);
+    LHashes := LComponent.GetValue('hashes') as TJSONArray;
+    Assert.IsNotNull(LHashes, AName + ' must include hashes');
+    Assert.IsTrue(LHashes.Count >= 2, AName + ' must include SHA-256 and SHA-512');
+    Assert.AreEqual(AVersion, LComponent.GetValue<string>('version', ''),
+      AName + ' must carry its PE version');
+    Assert.AreEqual(ASize, VendorProperty(LComponent, 'file:size'),
+      AName + ' size must match the file that was found');
+  end;
+  Assert.IsTrue(LFound > 0, AName + ' must be listed');
+end;
+
+procedure TEngineTests.ResolveDll_OnlyInInstaller_ReturnsProjectTree;
+var
+  LRoot, LOut, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LRoot := TPath.Combine(FTempDir, 'proj');
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win32');
+  TDirectory.CreateDirectory(LOut);
+  LExpected := MakeDummyDll(TPath.Combine(TPath.Combine(LRoot, 'Installer'), 'Dateien'),
+    'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    [], LSource);
+  Assert.AreEqual(Ord(dlsProjectTree), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+procedure TEngineTests.ResolveDll_InstallerBeatsOtherCopies;
+var
+  LRoot, LOut, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LRoot := TPath.Combine(FTempDir, 'proj');
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win32');
+  TDirectory.CreateDirectory(LOut);
+  MakeDummyDll(TPath.Combine(LRoot, 'redist'), 'vendor.dll');
+  MakeDummyDll(TPath.Combine(TPath.Combine(LRoot, 'Installer'), 'DateienKunde'),
+    'vendor.dll');
+  LExpected := MakeDummyDll(TPath.Combine(TPath.Combine(LRoot, 'Installer'), 'Dateien'),
+    'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    [], LSource);
+  Assert.AreEqual(Ord(dlsProjectTree), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+procedure TEngineTests.ResolveDll_OutputDirBeforeProjectTree;
+var
+  LRoot, LOut, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LRoot := TPath.Combine(FTempDir, 'proj');
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win32');
+  LExpected := MakeDummyDll(LOut, 'vendor.dll');
+  MakeDummyDll(TPath.Combine(TPath.Combine(LRoot, 'Installer'), 'Dateien'), 'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    [], LSource);
+  Assert.AreEqual(Ord(dlsOutputDirectory), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+procedure TEngineTests.ResolveDll_OtherProjectFolder_ReturnsProjectTree;
+var
+  LRoot, LOut, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LRoot := TPath.Combine(FTempDir, 'proj');
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win32');
+  TDirectory.CreateDirectory(LOut);
+  LExpected := MakeDummyDll(TPath.Combine(LRoot, 'redist'), 'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    [], LSource);
+  Assert.AreEqual(Ord(dlsProjectTree), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+procedure TEngineTests.ResolveDll_BplInInstaller_ReturnsProjectTree;
+var
+  LRoot, LOut, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LRoot := TPath.Combine(FTempDir, 'proj');
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win32');
+  TDirectory.CreateDirectory(LOut);
+  LExpected := MakeDummyDll(TPath.Combine(TPath.Combine(LRoot, 'Installer'), 'Dateien'),
+    'vendor.bpl');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.bpl', LOut, LRoot,
+    [], LSource);
+  Assert.AreEqual(Ord(dlsProjectTree), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+procedure TEngineTests.ResolveDll_DepthAndProjectRoot_AreBounded;
+var
+  LRoot, LOut, LOutside, LDeep, LResult: string;
+  LSource: TDllLocationSource;
+  I: Integer;
+begin
+  LRoot := TPath.Combine(FTempDir, 'proj');
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win32');
+  TDirectory.CreateDirectory(LOut);
+  LOutside := TPath.Combine(FTempDir, 'outside');
+  MakeDummyDll(LOutside, 'vendor.dll');
+
+  LDeep := LRoot;
+  for I := 1 to 7 do
+    LDeep := TPath.Combine(LDeep, 'd' + IntToStr(I));
+  MakeDummyDll(LDeep, 'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    [], LSource);
+  Assert.AreEqual(Ord(dlsNotFound), Ord(LSource),
+    'a DLL seven folders down, or outside the project, must not be used');
+  Assert.AreEqual('', LResult);
+
+  MakeDummyDll(TPath.GetDirectoryName(LDeep), 'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    [], LSource);
+  Assert.AreEqual(Ord(dlsProjectTree), Ord(LSource));
+  Assert.IsTrue(LResult.EndsWith(PathDelim + 'd6' + PathDelim + 'vendor.dll', True),
+    LResult);
+end;
+
+procedure TEngineTests.ResolveDll_SystemDirectoryUnchangedWithProjectDir;
+var
+  LRoot, LOut, LSys, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LRoot := TPath.Combine(FTempDir, 'proj');
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win32');
+  TDirectory.CreateDirectory(LOut);
+  TDirectory.CreateDirectory(TPath.Combine(TPath.Combine(LRoot, 'Installer'), 'Dateien'));
+  LSys := TPath.Combine(FTempDir, 'sys');
+  LExpected := MakeDummyDll(LSys, 'vendor.dll');
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    [LSys], LSource);
+  Assert.AreEqual(Ord(dlsSystemDirectory), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+/// <summary>
+/// Writes a file with a minimal PE header: "MZ", the header offset at $3C,
+/// "PE", and the COFF machine field. $014C is x86, $8664 is x64.
+/// </summary>
+function MakeFakePe(const ADir, AName: string; AMachine: Word): string;
+var
+  LBytes: TBytes;
+begin
+  TDirectory.CreateDirectory(ADir);
+  Result := TPath.Combine(ADir, AName);
+  SetLength(LBytes, 128);
+  FillChar(LBytes[0], Length(LBytes), 0);
+  LBytes[0] := Ord('M');
+  LBytes[1] := Ord('Z');
+  LBytes[$3C] := $40;
+  LBytes[$40] := Ord('P');
+  LBytes[$41] := Ord('E');
+  LBytes[$44] := Lo(AMachine);
+  LBytes[$45] := Hi(AMachine);
+  TFile.WriteAllBytes(Result, LBytes);
+end;
+
+procedure TEngineTests.ResolveDll_PlatformCopies_TargetPlatformWins;
+var
+  LRoot, LOut, LWin32, LWin64, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LRoot := TPath.Combine(FTempDir, 'proj');
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win32');
+  TDirectory.CreateDirectory(LOut);
+  LWin32 := MakeFakePe(TPath.Combine(TPath.Combine(LRoot, 'lib'), 'Win32'), 'vendor.dll', $014C);
+  LWin64 := MakeFakePe(TPath.Combine(TPath.Combine(LRoot, 'lib'), 'Win64'), 'vendor.dll', $8664);
+
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    'Win64', [], LSource);
+  Assert.AreEqual(Ord(dlsProjectTree), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LWin64), LResult),
+    'Win64 must take the x64 copy: ' + LResult);
+
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    'Win32', [], LSource);
+  Assert.AreEqual(Ord(dlsProjectTree), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LWin32), LResult),
+    'Win32 must take the x86 copy: ' + LResult);
+end;
+
+procedure TEngineTests.ResolveDll_PlatformCopyBeatsInstallerOfOtherPlatform;
+var
+  LRoot, LOut, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LRoot := TPath.Combine(FTempDir, 'proj');
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win64');
+  TDirectory.CreateDirectory(LOut);
+  MakeFakePe(TPath.Combine(LRoot, 'Installer'), 'vendor.dll', $014C);
+  LExpected := MakeFakePe(TPath.Combine(TPath.Combine(LRoot, 'redist'), 'x64'), 'vendor.dll', $8664);
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    'Win64', [], LSource);
+  Assert.AreEqual(Ord(dlsProjectTree), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+procedure TEngineTests.ResolveDll_NoPlatform_KeepsInstallerOrder;
+var
+  LRoot, LOut, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LRoot := TPath.Combine(FTempDir, 'proj');
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win64');
+  TDirectory.CreateDirectory(LOut);
+  LExpected := MakeFakePe(TPath.Combine(LRoot, 'Installer'), 'vendor.dll', $014C);
+  MakeFakePe(TPath.Combine(TPath.Combine(LRoot, 'redist'), 'x64'), 'vendor.dll', $8664);
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    [], LSource);
+  Assert.AreEqual(Ord(dlsProjectTree), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+procedure TEngineTests.ResolveDll_OnlyOtherPlatformCopy_IsStillFound;
+var
+  LRoot, LOut, LExpected, LResult: string;
+  LSource: TDllLocationSource;
+begin
+  LRoot := TPath.Combine(FTempDir, 'proj');
+  LOut := TPath.Combine(TPath.Combine(LRoot, 'Debug'), 'Win64');
+  TDirectory.CreateDirectory(LOut);
+  LExpected := MakeFakePe(TPath.Combine(LRoot, 'redist'), 'vendor.dll', $014C);
+  LResult := TDxComplyGenerator.ResolveExternalDllFile('vendor.dll', LOut, LRoot,
+    'Win64', [], LSource);
+  Assert.AreEqual(Ord(dlsProjectTree), Ord(LSource));
+  Assert.IsTrue(SameText(TPath.GetFullPath(LExpected), LResult), LResult);
+end;
+
+procedure TEngineTests.Generate_DllOnlyInInstaller_HasVersionAndHash;
+var
+  LProject, LDll, LDecoy, LLocation: string;
+  LJson: TJSONObject;
+  LComponents: TJSONArray;
+  LComponent: TJSONObject;
+  I: Integer;
+begin
+  LProject := CreateVendorDllProject('installer-only',
+    TPath.Combine('Installer', 'Dateien'), 'vendor.dll', True, LDll);
+  LDecoy := TPath.Combine(TPath.GetDirectoryName(TPath.GetDirectoryName(LDll)),
+    TPath.Combine('DateienKunde', 'vendor.dll'));
+  TDirectory.CreateDirectory(TPath.GetDirectoryName(LDecoy));
+  TFile.WriteAllText(LDecoy, 'MZ other copy', TEncoding.UTF8);
+
+  LJson := GenerateVendorProject(LProject);
+  try
+    AssertShippedDllEvidence(LJson, 'vendor.dll', GetFileVersionText(LDll),
+      IntToStr(TFile.GetSize(LDll)));
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'vendor.dll'),
+      'The staged DLL must be listed once');
+    LComponents := LJson.GetValue('components') as TJSONArray;
+    LLocation := '';
+    for I := 0 to LComponents.Count - 1 do
+    begin
+      LComponent := LComponents.Items[I] as TJSONObject;
+      if SameText(LComponent.GetValue<string>('name', ''), 'vendor.dll') then
+        LLocation := VendorProperty(LComponent,
+          'net.developer-experts.dx-comply:locationSource');
+    end;
+    Assert.AreEqual('project-tree', LLocation,
+      'locationSource must say the DLL was found in the project tree');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'noise.dll'),
+      'An unrelated DLL under Installer must not be added');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_DllOnlyInOutputDir_HasVersionAndHash;
+var
+  LProject, LDll: string;
+  LJson: TJSONObject;
+begin
+  LProject := CreateVendorDllProject('output-only',
+    TPath.Combine('Debug', 'Win32'), 'vendor.dll', True, LDll);
+  LJson := GenerateVendorProject(LProject);
+  try
+    AssertShippedDllEvidence(LJson, 'vendor.dll', GetFileVersionText(LDll),
+      IntToStr(TFile.GetSize(LDll)));
+    Assert.IsTrue(Pos('"output-directory"', LJson.ToJSON) > 0,
+      'The source-scanned DLL must still report output-directory');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'noise.dll'),
+      'An unrelated DLL under Installer must not be added');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_SystemDll_HasLocationButNoHash;
+var
+  LProject, LDll, LLocation: string;
+  LJson: TJSONObject;
+  LComponents: TJSONArray;
+  LComponent: TJSONObject;
+  I: Integer;
+  LFound: Boolean;
+begin
+  LProject := CreateVendorDllProject('system-only', 'Installer\Dateien',
+    'kernel32.dll', False, LDll);
+  LJson := GenerateVendorProject(LProject);
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'kernel32.dll'));
+    Assert.IsFalse(ComponentHasHash(LJson, 'kernel32.dll'),
+      'A system DLL must not be hashed');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'noise.dll'));
+    LComponents := LJson.GetValue('components') as TJSONArray;
+    LFound := False;
+    for I := 0 to LComponents.Count - 1 do
+    begin
+      LComponent := LComponents.Items[I] as TJSONObject;
+      if not SameText(LComponent.GetValue<string>('name', ''), 'kernel32.dll') then
+        Continue;
+      LFound := True;
+      Assert.AreEqual('system-directory',
+        VendorProperty(LComponent, 'net.developer-experts.dx-comply:locationSource'));
+      LLocation := VendorProperty(LComponent, 'net.developer-experts.dx-comply:location');
+      Assert.IsTrue((Pos('\System32\', LLocation) > 0) or (Pos('\SysWOW64\', LLocation) > 0),
+        LLocation);
+      Assert.AreEqual('', LComponent.GetValue<string>('version', ''),
+        'A system DLL must not take the build machine''s file version');
+    end;
+    Assert.IsTrue(LFound, 'kernel32.dll must be listed');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.SystemDirectories_NonWindowsPlatform_IsEmpty;
+begin
+  Assert.AreEqual(NativeInt(0), NativeInt(Length(
+    TDxComplyGenerator.SystemDirectoriesForPlatform('Android64'))));
+  Assert.AreEqual(NativeInt(0), NativeInt(Length(
+    TDxComplyGenerator.SystemDirectoriesForPlatform('Linux64'))));
+end;
+
+procedure TEngineTests.SystemDirectories_Win32AndWin64_MatchBitness;
+var
+  LDirs: TArray<string>;
+  LWin32Expected: string;
+begin
+  if TDirectory.Exists(TPath.Combine(GetEnvironmentVariable('SystemRoot'), 'SysWOW64')) then
+    LWin32Expected := 'SysWOW64'
+  else
+    LWin32Expected := 'System32';
+  LDirs := TDxComplyGenerator.SystemDirectoriesForPlatform('Win32');
+  Assert.AreEqual(NativeInt(1), NativeInt(Length(LDirs)));
+  Assert.IsTrue(SameText(TPath.GetFileName(LDirs[0]), LWin32Expected), LDirs[0]);
+
+  LDirs := TDxComplyGenerator.SystemDirectoriesForPlatform('Win64');
+  Assert.AreEqual(NativeInt(1), NativeInt(Length(LDirs)));
+  Assert.IsTrue(SameText(TPath.GetFileName(LDirs[0]), 'System32') or
+    SameText(TPath.GetFileName(LDirs[0]), 'Sysnative'), LDirs[0]);
 end;
 
 // ---- ScanPasFilesForDllReferences (issue #24) ------------------------------
@@ -1014,7 +2284,1913 @@ begin
     'unit and GetModuleHandle is called in another');
 end;
 
+function TEngineTests_WriteConfig(const ADir, AJson: string): string;
+begin
+  Result := TPath.Combine(ADir, 'dxcomply.json');
+  TFile.WriteAllText(Result, AJson, TEncoding.UTF8);
+end;
+
+procedure TEngineTests.LoadConfig_SupplierWithAmpersand_StaysIntact;
+const
+  cSupplier = 'ebm-papst Mulfingen GmbH & Co. KGaA & Co. KG';
+var
+  LGen: TDxComplyGenerator;
+  LPath: string;
+begin
+  LPath := TEngineTests_WriteConfig(FTempDir,
+    '{"product":{"supplier":"' + cSupplier + '"}}');
+  LGen := TDxComplyGenerator.Create;
+  try
+    Assert.AreEqual(cSupplier, LGen.LoadConfig(LPath).Supplier);
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.LoadConfig_ConfigNameAndPlatform;
+var
+  LGen: TDxComplyGenerator;
+  LConfig: TSbomConfig;
+  LPath: string;
+begin
+  LPath := TEngineTests_WriteConfig(FTempDir,
+    '{"configName":" Debug ","platform":" Win64 ","format":"spdx-json",' +
+    '"product":{"name":"FromFile","supplier":"File GmbH"},' +
+    '"report":{"enabled":true,"format":"html"}}');
+  LGen := TDxComplyGenerator.Create;
+  try
+    LConfig := LGen.LoadConfig(LPath);
+    Assert.AreEqual('Debug', LConfig.Configuration, 'configName must be trimmed and stored');
+    Assert.AreEqual('Win64', LConfig.Platform, 'platform must be trimmed and stored');
+    Assert.AreEqual(Ord(sfSpdxJson), Ord(LConfig.Format));
+    Assert.AreEqual('FromFile', LConfig.ProductName);
+    Assert.AreEqual('File GmbH', LConfig.Supplier);
+    Assert.IsTrue(LConfig.HumanReadableReport.Enabled);
+    Assert.AreEqual(Ord(hrfHtml), Ord(LConfig.HumanReadableReport.Format));
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.LoadConfig_UnsupportedSpdxVersion_Warns;
+var
+  LGen: TDxComplyGenerator;
+  LConfig: TSbomConfig;
+  LPath: string;
+begin
+  LGen := TDxComplyGenerator.Create;
+  try
+    LGen.OnProgress := OnProgress;
+
+    LPath := TEngineTests_WriteConfig(FTempDir, '{"format":"spdx-json","spdxVersion":"3.0"}');
+    FProgressMessages.Clear;
+    LConfig := LGen.LoadConfig(LPath);
+    Assert.AreEqual(Ord(sfSpdxJson), Ord(LConfig.Format), 'An unknown version writes SPDX 2.3');
+    Assert.IsTrue(Pos('Warning: spdxVersion "3.0"', FProgressMessages.Text) > 0,
+      'The unsupported value must be reported: ' + FProgressMessages.Text);
+
+    LPath := TEngineTests_WriteConfig(FTempDir, '{"format":"spdx-json","spdxVersion":"3.0.1"}');
+    FProgressMessages.Clear;
+    LConfig := LGen.LoadConfig(LPath);
+    Assert.AreEqual(Ord(sfSpdx3Json), Ord(LConfig.Format));
+    Assert.AreEqual(0, Pos('spdxVersion', FProgressMessages.Text),
+      'A supported value gives no warning: ' + FProgressMessages.Text);
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.ThirdPartyCheck_NoCompositionEvidence_StillSeesResolvedUnits;
+var
+  LGen: TDxComplyGenerator;
+  LConfig: TSbomConfig;
+  LEvidence: TCompositionEvidence;
+  LUnit: TResolvedUnitInfo;
+  LArtefacts, LChecked: TArtefactList;
+  LUnitPath: string;
+begin
+  LUnitPath := TPath.Combine(FTempDir, 'JvComponent.pas');
+  TFile.WriteAllText(LUnitPath, 'unit JvComponent; interface implementation end.', TEncoding.UTF8);
+
+  LEvidence := TCompositionEvidence.Create;
+  LArtefacts := TArtefactList.Create;
+  try
+    LUnit := Default(TResolvedUnitInfo);
+    LUnit.UnitName := 'JvComponent';
+    LUnit.ResolvedPath := LUnitPath;
+    LUnit.OriginKind := uokThirdParty;
+    LEvidence.Units.Add(LUnit);
+
+    LConfig := TSbomConfig.Default;
+    LConfig.IncludeCompositionEvidence := False;
+    LGen := TDxComplyGenerator.Create(LConfig);
+    try
+      LChecked := LGen.ThirdPartyCheckArtefacts(LEvidence, LArtefacts);
+      try
+        Assert.AreEqual(NativeInt(1), NativeInt(LChecked.Count),
+          'The resolved unit must be part of the check');
+        Assert.AreEqual('unit-evidence', LChecked[0].ArtefactType);
+        Assert.AreEqual('Third party', LChecked[0].Origin);
+        Assert.AreEqual(NativeInt(0), NativeInt(LArtefacts.Count),
+          'The SBOM artefact list itself stays without units');
+      finally
+        LChecked.Free;
+      end;
+    finally
+      LGen.Free;
+    end;
+
+    // With composition evidence on, the units are already SBOM artefacts
+    // and must not be added a second time.
+    LConfig.IncludeCompositionEvidence := True;
+    LGen := TDxComplyGenerator.Create(LConfig);
+    try
+      LChecked := LGen.ThirdPartyCheckArtefacts(LEvidence, LArtefacts);
+      try
+        Assert.AreEqual(NativeInt(0), NativeInt(LChecked.Count));
+      finally
+        LChecked.Free;
+      end;
+    finally
+      LGen.Free;
+    end;
+  finally
+    LArtefacts.Free;
+    LEvidence.Free;
+  end;
+end;
+
+procedure TEngineTests.LoadConfig_NonObjectRoot_ReturnsDefaults;
+var
+  LGen: TDxComplyGenerator;
+  LConfig: TSbomConfig;
+  LPath: string;
+begin
+  LConfig := TSbomConfig.Default;
+  LPath := TEngineTests_WriteConfig(FTempDir, '[1, 2, 3]');
+  LGen := TDxComplyGenerator.Create;
+  try
+    Assert.WillNotRaise(
+      procedure
+      begin
+        LConfig := LGen.LoadConfig(LPath);
+      end,
+      Exception,
+      'A JSON array root must not raise');
+    Assert.AreEqual('Release', LConfig.Configuration);
+    Assert.AreEqual('Win32', LConfig.Platform);
+    Assert.AreEqual('bom.json', LConfig.OutputPath);
+
+    LConfig := LGen.LoadConfig(TEngineTests_WriteConfig(FTempDir, '"not-an-object"'));
+    Assert.AreEqual('Release', LConfig.Configuration);
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.LoadConfig_DeepEvidenceBuild_DoesNotOverrideMode;
+var
+  LGen: TDxComplyGenerator;
+  LConfig: TSbomConfig;
+begin
+  LGen := TDxComplyGenerator.Create;
+  try
+    LConfig := LGen.LoadConfig(TEngineTests_WriteConfig(FTempDir,
+      '{"deepEvidence":{"mode":"always","build":false}}'));
+    Assert.AreEqual(Ord(debAlways), Ord(LConfig.DeepEvidenceMode),
+      'deepEvidence.build must not overwrite mode always');
+
+    LConfig := LGen.LoadConfig(TEngineTests_WriteConfig(FTempDir,
+      '{"deepEvidence":{"build":false}}'));
+    Assert.AreEqual(Ord(debWhenMapMissing), Ord(LConfig.DeepEvidenceMode),
+      'build alone must leave the default mode');
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.GenerateFromConfig_FileValues_ApplyWhenNotExplicit;
+var
+  LGen: TDxComplyGenerator;
+  LPath: string;
+begin
+  LPath := TEngineTests_WriteConfig(FTempDir,
+    '{"configName":"Debug","platform":"Win64","format":"spdx-json",' +
+    '"output":"from-file.json","product":{"name":"FileApp","supplier":"FileCo"}}');
+  LGen := TDxComplyGenerator.Create;
+  try
+    // Missing project: Generate fails, but the merge has already happened.
+    LGen.GenerateFromConfig('missing.dproj', LPath);
+    Assert.AreEqual('Debug', LGen.Config.Configuration);
+    Assert.AreEqual('Win64', LGen.Config.Platform);
+    Assert.AreEqual(Ord(sfSpdxJson), Ord(LGen.Config.Format));
+    Assert.AreEqual('from-file.json', LGen.Config.OutputPath);
+    Assert.AreEqual('FileApp', LGen.Config.ProductName);
+    Assert.AreEqual('FileCo', LGen.Config.Supplier);
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.GenerateFromConfig_ExplicitCaller_OverridesFile;
+var
+  LCaller: TSbomConfig;
+  LGen: TDxComplyGenerator;
+  LPath: string;
+begin
+  LPath := TEngineTests_WriteConfig(FTempDir,
+    '{"configName":"Release","platform":"Win32","format":"spdx-json",' +
+    '"output":"from-file.json",' +
+    '"product":{"name":"FileApp","version":"9.9.9","supplier":"FileCo"},' +
+    '"report":{"enabled":true,"format":"html","output":"auditor-report"}}');
+  LCaller := TSbomConfig.Default;
+  LCaller.Configuration := 'Debug';
+  LCaller.Platform := 'Win64';
+  LCaller.Format := sfCycloneDxXml;
+  LCaller.OutputPath := 'cli.json';
+  LCaller.ProductName := 'CliApp';
+  LCaller.Supplier := 'CliCo';
+  LCaller.HumanReadableReport.Enabled := True;
+  LCaller.HumanReadableReport.Format := hrfMarkdown;
+  LCaller.ExplicitOverrides := [scoConfiguration, scoPlatform, scoFormat,
+    scoOutputPath, scoProductName, scoSupplier, scoReport];
+
+  LGen := TDxComplyGenerator.Create(LCaller);
+  try
+    LGen.GenerateFromConfig('missing.dproj', LPath);
+    Assert.AreEqual('Debug', LGen.Config.Configuration, 'explicit --config-name wins');
+    Assert.AreEqual('Win64', LGen.Config.Platform, 'explicit --platform wins');
+    Assert.AreEqual(Ord(sfCycloneDxXml), Ord(LGen.Config.Format), 'explicit --format wins');
+    Assert.AreEqual('cli.json', LGen.Config.OutputPath, 'explicit --output wins');
+    Assert.AreEqual('CliApp', LGen.Config.ProductName, 'explicit --product wins');
+    Assert.AreEqual('CliCo', LGen.Config.Supplier, 'explicit --supplier wins');
+    Assert.AreEqual('9.9.9', LGen.Config.ProductVersion,
+      'version was not passed, so the file value stays');
+    Assert.IsTrue(LGen.Config.HumanReadableReport.Enabled);
+    Assert.AreEqual(Ord(hrfMarkdown), Ord(LGen.Config.HumanReadableReport.Format),
+      'explicit --report wins over the file format');
+    Assert.AreEqual('auditor-report', LGen.Config.HumanReadableReport.OutputBasePath,
+      'report output path stays with the file');
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.GenerateFromConfig_IncludePlatformInOutput_DecoratesMergedOutput;
+var
+  LCaller: TSbomConfig;
+  LGen: TDxComplyGenerator;
+  LPath: string;
+begin
+  LPath := TEngineTests_WriteConfig(FTempDir,
+    '{"output":"custom.json","platform":"Win64","configName":"Debug"}');
+  LCaller := TSbomConfig.Default;
+  LCaller.IncludePlatformInOutput := True;
+  LGen := TDxComplyGenerator.Create(LCaller);
+  try
+    LGen.GenerateFromConfig('missing.dproj', LPath);
+    Assert.AreEqual('custom.Win64.Debug.json', LGen.Config.OutputPath,
+      'decoration uses the merged platform and configuration');
+  finally
+    LGen.Free;
+  end;
+
+  LCaller := TSbomConfig.Default;
+  LCaller.IncludePlatformInOutput := True;
+  LCaller.OutputPath := 'given.json';
+  LCaller.ExplicitOverrides := [scoOutputPath];
+  LGen := TDxComplyGenerator.Create(LCaller);
+  try
+    LGen.GenerateFromConfig('missing.dproj', LPath);
+    Assert.AreEqual('given.json', LGen.Config.OutputPath,
+      'an explicit output path is not decorated');
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.ResolveSbomOutputPath_RelativeAndAbsoluteDirectory;
+var
+  LProjectDir: string;
+begin
+  LProjectDir := 'C:\Projects\Demo';
+  Assert.AreEqual(TPath.Combine(LProjectDir, 'bom.json'),
+    TSbomConfig.ResolveSbomOutputPath('bom.json', '', LProjectDir,
+      'Win32', 'Release', False, False),
+    'an empty outputDir keeps bom.json next to the project');
+  Assert.AreEqual(TPath.Combine(TPath.Combine(LProjectDir, 'out'), 'bom.json'),
+    TSbomConfig.ResolveSbomOutputPath('bom.json', 'out', LProjectDir,
+      'Win32', 'Release', False, False),
+    'a relative outputDir is resolved from the project directory');
+  Assert.AreEqual('C:\Archive\bom.json',
+    TSbomConfig.ResolveSbomOutputPath('bom.json', 'C:\Archive', LProjectDir,
+      'Win32', 'Release', False, False),
+    'an absolute outputDir is used as given');
+  Assert.AreEqual(TPath.Combine(TPath.Combine(LProjectDir, 'out'), 'custom.json'),
+    TSbomConfig.ResolveSbomOutputPath('custom.json', 'out', LProjectDir,
+      'Win32', 'Release', False, False),
+    'a bare file name is placed in outputDir');
+  Assert.AreEqual(TPath.Combine(LProjectDir, 'build\custom.json'),
+    TSbomConfig.ResolveSbomOutputPath('build\custom.json', 'out', LProjectDir,
+      'Win32', 'Release', False, False),
+    'a file path that already has a directory is not moved');
+end;
+
+procedure TEngineTests.ResolveSbomOutputPath_ExplicitFileWins;
+var
+  LProjectDir: string;
+begin
+  LProjectDir := 'C:\Projects\Demo';
+  Assert.AreEqual(TPath.Combine(LProjectDir, 'cli.json'),
+    TSbomConfig.ResolveSbomOutputPath('cli.json', 'out', LProjectDir,
+      'Win32', 'Release', True, False),
+    'a relative --output stays relative to the project directory');
+  Assert.AreEqual('D:\Files\cli.json',
+    TSbomConfig.ResolveSbomOutputPath('D:\Files\cli.json', 'C:\Archive',
+      LProjectDir, 'Win32', 'Release', True, False),
+    'an absolute --output wins over outputDir');
+end;
+
+procedure TEngineTests.ResolveSbomOutputPath_PlatformDecorationKeepsDirectory;
+var
+  LProjectDir, LExpected: string;
+begin
+  LProjectDir := 'C:\Projects\Demo';
+  LExpected := TPath.Combine(TPath.Combine(LProjectDir, 'out'),
+    'bom.Win64.Release.json');
+  Assert.AreEqual(LExpected,
+    TSbomConfig.ResolveSbomOutputPath('bom.json', 'out', LProjectDir,
+      'Win64', 'Release', False, True),
+    'decoration changes the file name inside outputDir');
+  Assert.AreEqual('C:\Archive\bom.Win64.Debug.json',
+    TSbomConfig.ResolveSbomOutputPath('bom.json', 'C:\Archive', LProjectDir,
+      'Win64', 'Debug', False, True),
+    'decoration keeps an absolute outputDir');
+  Assert.AreEqual(TPath.Combine(LProjectDir, 'given.json'),
+    TSbomConfig.ResolveSbomOutputPath('given.json', 'out', LProjectDir,
+      'Win64', 'Release', True, True),
+    'an explicit file path is not decorated');
+end;
+
+procedure TEngineTests.ChooseOutputDirectory_ProjectFileWins;
+begin
+  Assert.AreEqual('sbom', TSbomConfig.ChooseOutputDirectory('C:\Ide', 'sbom'),
+    'a project outputDir wins over the IDE options directory');
+  Assert.AreEqual('C:\Ide', TSbomConfig.ChooseOutputDirectory('C:\Ide', ''),
+    'an empty project value keeps the IDE options directory');
+  Assert.AreEqual('C:\Ide', TSbomConfig.ChooseOutputDirectory('C:\Ide', '  '),
+    'a blank project value keeps the IDE options directory');
+  Assert.AreEqual('', TSbomConfig.ChooseOutputDirectory('', ''),
+    'both empty keeps the project folder');
+end;
+
+procedure TEngineTests.GenerateFromConfig_OutputDir_MergesPath;
+var
+  LCaller: TSbomConfig;
+  LGen: TDxComplyGenerator;
+  LPath: string;
+begin
+  LPath := TEngineTests_WriteConfig(FTempDir, '{"outputDir":" out "}');
+  LGen := TDxComplyGenerator.Create;
+  try
+    LGen.GenerateFromConfig('missing.dproj', LPath);
+    Assert.AreEqual('out', LGen.Config.OutputDir, 'outputDir must be trimmed');
+    Assert.AreEqual(TPath.Combine('out', 'bom.json'), LGen.Config.OutputPath,
+      'outputDir alone writes bom.json into that directory');
+  finally
+    LGen.Free;
+  end;
+
+  LPath := TEngineTests_WriteConfig(FTempDir,
+    '{"outputDir":"out","output":"custom.json"}');
+  LGen := TDxComplyGenerator.Create;
+  try
+    LGen.GenerateFromConfig('missing.dproj', LPath);
+    Assert.AreEqual(TPath.Combine('out', 'custom.json'), LGen.Config.OutputPath,
+      'a bare output file name is placed in outputDir');
+  finally
+    LGen.Free;
+  end;
+
+  LPath := TEngineTests_WriteConfig(FTempDir,
+    '{"outputDir":"out","output":"build/custom.json"}');
+  LGen := TDxComplyGenerator.Create;
+  try
+    LGen.GenerateFromConfig('missing.dproj', LPath);
+    Assert.AreEqual('build/custom.json', LGen.Config.OutputPath,
+      'an output value that has a directory stays that file path');
+  finally
+    LGen.Free;
+  end;
+
+  LCaller := TSbomConfig.Default;
+  LCaller.OutputPath := 'cli.json';
+  LCaller.ExplicitOverrides := [scoOutputPath];
+  LCaller.IncludePlatformInOutput := True;
+  LGen := TDxComplyGenerator.Create(LCaller);
+  try
+    LGen.GenerateFromConfig('missing.dproj', LPath);
+    Assert.AreEqual('cli.json', LGen.Config.OutputPath,
+      'explicit --output wins over outputDir and is not decorated');
+  finally
+    LGen.Free;
+  end;
+
+  LPath := TEngineTests_WriteConfig(FTempDir,
+    '{"outputDir":"out","platform":"Win64","configName":"Debug"}');
+  LCaller := TSbomConfig.Default;
+  LCaller.IncludePlatformInOutput := True;
+  LGen := TDxComplyGenerator.Create(LCaller);
+  try
+    LGen.GenerateFromConfig('missing.dproj', LPath);
+    Assert.AreEqual(TPath.Combine('out', 'bom.Win64.Debug.json'),
+      LGen.Config.OutputPath,
+      'decoration runs after the file is placed in outputDir');
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.GenerateFromConfig_OutputDir_WritesSbomAndReports;
+var
+  LConfigJson: TStringList;
+  LConfigPath, LDir, LEscapedDir: string;
+  LGen: TDxComplyGenerator;
+begin
+  LDir := TPath.Combine(FTempDir, 'sbom-out');
+  LEscapedDir := StringReplace(LDir, '\', '\\', [rfReplaceAll]);
+  LConfigPath := TPath.Combine(FTempDir, 'dxcomply.outdir.json');
+  LConfigJson := TStringList.Create;
+  try
+    LConfigJson.Add('{');
+    LConfigJson.Add('  "outputDir": "' + LEscapedDir + '",');
+    LConfigJson.Add('  "report": {');
+    LConfigJson.Add('    "enabled": true,');
+    LConfigJson.Add('    "format": "both"');
+    LConfigJson.Add('  }');
+    LConfigJson.Add('}');
+    LConfigJson.SaveToFile(LConfigPath, TEncoding.UTF8);
+  finally
+    LConfigJson.Free;
+  end;
+
+  LGen := TDxComplyGenerator.Create;
+  try
+    LGen.OnProgress := OnProgress;
+    Assert.IsTrue(LGen.GenerateFromConfig(FEngineDprojPath, LConfigPath),
+      'GenerateFromConfig must write the SBOM into outputDir');
+    Assert.IsTrue(TFile.Exists(TPath.Combine(LDir, 'bom.json')),
+      'bom.json must be created in outputDir');
+    Assert.IsTrue(TFile.Exists(TPath.Combine(LDir, 'bom.report.html')),
+      'the HTML report must sit next to the SBOM when report.output is empty');
+    Assert.IsTrue(TFile.Exists(TPath.Combine(LDir, 'bom.report.md')),
+      'the Markdown report must sit next to the SBOM when report.output is empty');
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.ScanPasFiles_ExternalLiteral_DetectsDllName;
+var
+  LPasFile: string;
+  LDllNames: TArray<string>;
+const
+  cSource =
+    'unit WinHook;'#13#10 +
+    'interface'#13#10 +
+    '{$I+}'#13#10 +
+    'function GetTickCount: Cardinal; stdcall; external ''kernel32.dll'';'#13#10 +
+    'implementation'#13#10 +
+    'end.';
+begin
+  LPasFile := TPath.Combine(FTempDir, 'WinHook.pas');
+  TFile.WriteAllText(LPasFile, cSource, TEncoding.UTF8);
+  LDllNames := TDxComplyGenerator.ScanPasFilesForDllReferences(
+    TArray<string>.Create(LPasFile));
+  Assert.IsTrue(TArray.IndexOf<string>(LDllNames, 'kernel32.dll') >= 0,
+    'a quoted external DLL name must be detected');
+end;
+
+procedure TEngineTests.ScanPasFiles_ExternalIdentifier_ResolvesConst;
+var
+  LPasFile: string;
+  LDllNames: TArray<string>;
+const
+  cSource =
+    'unit NetApi;'#13#10 +
+    'interface'#13#10 +
+    'const'#13#10 +
+    '  NETAPI = ''netapi32.dll'';'#13#10 +
+    'function NetWkstaGetInfo: Integer; stdcall; external NETAPI;'#13#10 +
+    'implementation'#13#10 +
+    'end.';
+begin
+  LPasFile := TPath.Combine(FTempDir, 'NetApi.pas');
+  TFile.WriteAllText(LPasFile, cSource, TEncoding.UTF8);
+  LDllNames := TDxComplyGenerator.ScanPasFilesForDllReferences(
+    TArray<string>.Create(LPasFile));
+  Assert.IsTrue(TArray.IndexOf<string>(LDllNames, 'netapi32.dll') >= 0,
+    'external NETAPI must resolve the const to netapi32.dll');
+end;
+
+procedure TEngineTests.ScanPasFiles_ExternalInInclude_IfdefConst_ResolvesBothNames;
+var
+  LPasFile: string;
+  LIncFile: string;
+  LDllNames: TArray<string>;
+  LConditional: TArray<Boolean>;
+  LSearchPaths: TArray<string>;
+
+  function IsConditional(const AName: string): Boolean;
+  var
+    LIndex: Integer;
+  begin
+    LIndex := TArray.IndexOf<string>(LDllNames, AName);
+    Assert.IsTrue(LIndex >= 0, AName + ' must be detected');
+    Result := LConditional[LIndex];
+  end;
+
+const
+  // Mirrors the project attached to issue #45: the import lives in an
+  // include, and DLLName is assigned in both {$IFDEF} branches.
+  cInc =
+    '  function OpcUa_P_Initialize; external DLLName ' +
+    '{$IFDEF UASTACK_32} name ''_OpcUa_P_Initialize@4'' {$ENDIF};'#13#10;
+  cPas =
+    'unit Unit2;'#13#10 +
+    'interface'#13#10 +
+    'implementation'#13#10 +
+    'const'#13#10 +
+    '{$IFDEF UASTACK_32}'#13#10 +
+    '  DLLName = ''uastack_32.dll'';'#13#10 +
+    '{$ELSE}'#13#10 +
+    '  DLLName = ''uastack_64.dll'';'#13#10 +
+    '{$ENDIF}'#13#10 +
+    '{$INCLUDE ''StackMethodsImpl.inc''}'#13#10 +
+    'end.'#13#10;
+begin
+  LPasFile := TPath.Combine(FTempDir, 'Unit2.pas');
+  LIncFile := TPath.Combine(FTempDir, 'StackMethodsImpl.inc');
+  TFile.WriteAllText(LIncFile, cInc, TEncoding.UTF8);
+  TFile.WriteAllText(LPasFile, cPas, TEncoding.UTF8);
+  SetLength(LSearchPaths, 0);
+  LDllNames := TDxComplyGenerator.ScanPasFilesForDllReferences(
+    TArray<string>.Create(LPasFile), LSearchPaths, LConditional);
+  Assert.IsTrue(IsConditional('uastack_32.dll'),
+    'uastack_32.dll from the {$IFDEF} branch must be detected and marked conditional');
+  Assert.IsTrue(IsConditional('uastack_64.dll'),
+    'uastack_64.dll from the {$ELSE} branch must be detected and marked conditional');
+end;
+
+procedure TEngineTests.ScanPasFiles_IncludeOnSearchPath_ResolvesExternalDll;
+var
+  LPasFile: string;
+  LIncDir: string;
+  LIncFile: string;
+  LDllNames: TArray<string>;
+  LConditional: TArray<Boolean>;
+  LSearchPaths: TArray<string>;
+const
+  cInc =
+    'function OpcUa_P_Initialize; external DLLName;'#13#10;
+  cPas =
+    'unit Unit2;'#13#10 +
+    'interface'#13#10 +
+    'implementation'#13#10 +
+    'const'#13#10 +
+    '  DLLName = ''uastack_64.dll'';'#13#10 +
+    '{$INCLUDE ''StackMethodsImpl.inc''}'#13#10 +
+    'end.'#13#10;
+begin
+  LIncDir := TPath.Combine(FTempDir, 'includes');
+  TDirectory.CreateDirectory(LIncDir);
+  LPasFile := TPath.Combine(FTempDir, 'Unit2.pas');
+  LIncFile := TPath.Combine(LIncDir, 'StackMethodsImpl.inc');
+  TFile.WriteAllText(LIncFile, cInc, TEncoding.UTF8);
+  TFile.WriteAllText(LPasFile, cPas, TEncoding.UTF8);
+
+  SetLength(LSearchPaths, 1);
+  LSearchPaths[0] := LIncDir;
+  LDllNames := TDxComplyGenerator.ScanPasFilesForDllReferences(
+    TArray<string>.Create(LPasFile), LSearchPaths, LConditional);
+  Assert.IsTrue(TArray.IndexOf<string>(LDllNames, 'uastack_64.dll') >= 0,
+    'an include on the search path must be expanded and the DLL reported');
+  Assert.IsFalse(LConditional[TArray.IndexOf<string>(LDllNames, 'uastack_64.dll')],
+    'a single const value is not conditional');
+end;
+
+procedure TEngineTests.ScanPasFiles_LoadLibraryInInclude_ResolvesConst;
+var
+  LPasFile: string;
+  LIncFile: string;
+  LDllNames: TArray<string>;
+const
+  cInc =
+    'procedure LoadIt;'#13#10 +
+    'begin'#13#10 +
+    '  LoadLibrary(IBASE_DLL);'#13#10 +
+    'end;'#13#10;
+  cPas =
+    'unit IbWrap;'#13#10 +
+    'interface'#13#10 +
+    'implementation'#13#10 +
+    'const'#13#10 +
+    '  IBASE_DLL = ''gds32.dll'';'#13#10 +
+    '{$I ''IbLoad.inc''}'#13#10 +
+    'end.';
+begin
+  LPasFile := TPath.Combine(FTempDir, 'IbWrap.pas');
+  LIncFile := TPath.Combine(FTempDir, 'IbLoad.inc');
+  TFile.WriteAllText(LIncFile, cInc, TEncoding.UTF8);
+  TFile.WriteAllText(LPasFile, cPas, TEncoding.UTF8);
+  LDllNames := TDxComplyGenerator.ScanPasFilesForDllReferences(
+    TArray<string>.Create(LPasFile));
+  Assert.IsTrue(TArray.IndexOf<string>(LDllNames, 'gds32.dll') >= 0,
+    'LoadLibrary(IBASE_DLL) inside an include must resolve gds32.dll');
+end;
+
+procedure TEngineTests.ScanPasFiles_UnresolvedExternalIdent_IsIgnored;
+var
+  LPasFile: string;
+  LDllNames: TArray<string>;
+const
+  cSource =
+    'unit Bare;'#13#10 +
+    'interface'#13#10 +
+    'function Foo: Integer; external NotADll;'#13#10 +
+    'implementation'#13#10 +
+    'end.';
+begin
+  LPasFile := TPath.Combine(FTempDir, 'Bare.pas');
+  TFile.WriteAllText(LPasFile, cSource, TEncoding.UTF8);
+  LDllNames := TDxComplyGenerator.ScanPasFilesForDllReferences(
+    TArray<string>.Create(LPasFile));
+  Assert.AreEqual(NativeInt(0), NativeInt(Length(LDllNames)),
+    'an unresolved external identifier must not be reported as a DLL name');
+end;
+
+procedure TEngineTests.Config_Default_ScanTreeIsFalse;
+var
+  LConfig: TSbomConfig;
+begin
+  LConfig := TSbomConfig.Default;
+  Assert.IsFalse(LConfig.ScanTree,
+    'TSbomConfig.Default.ScanTree must be False');
+  Assert.AreEqual(NativeInt(0), NativeInt(Length(LConfig.ScanDirs)),
+    'TSbomConfig.Default.ScanDirs must be empty');
+end;
+
+function TEngineTests.CreateScopeProject(const AFolder: string;
+  AWithOutputDir: Boolean): string;
+var
+  LRoot: string;
+  LXml: string;
+begin
+  LRoot := TPath.Combine(FTempDir, AFolder);
+  TDirectory.CreateDirectory(LRoot);
+  TDirectory.CreateDirectory(TPath.Combine(LRoot, 'setup'));
+  TDirectory.CreateDirectory(TPath.Combine(LRoot, 'output'));
+  TDirectory.CreateDirectory(TPath.Combine(LRoot, 'output', 'nested'));
+  TDirectory.CreateDirectory(TPath.Combine(LRoot, 'staging'));
+  TDirectory.CreateDirectory(TPath.Combine(LRoot, 'staging', 'nested'));
+
+  TFile.WriteAllText(TPath.Combine(LRoot, 'MyApp.dpr'),
+    'program MyApp;' + sLineBreak +
+    'procedure NotShipped; external ''notshipped.dll'';' + sLineBreak +
+    'begin' + sLineBreak +
+    'end.' + sLineBreak, TEncoding.UTF8);
+
+  LXml :=
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>MyApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Application</AppType>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak;
+  if AWithOutputDir then
+    LXml := LXml + '    <DCC_ExeOutput>.\output</DCC_ExeOutput>' + sLineBreak;
+  LXml := LXml +
+    '    <UsePackages>true</UsePackages>' + sLineBreak +
+    '    <DCC_UsePackage>rtl</DCC_UsePackage>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>';
+
+  Result := TPath.Combine(LRoot, 'MyApp.dproj');
+  TFile.WriteAllText(Result, LXml, TEncoding.UTF8);
+
+  // Two copies of MyApp.exe: one in the project root (the fallback output)
+  // and one in output\ (the configured output). The map files exist so the
+  // Deep-Evidence build is skipped.
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'MyApp.exe'), TBytes.Create($4D, $5A, $01));
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'setup', 'setup.exe'), TBytes.Create($4D, $5A, $02));
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'output', 'MyApp.exe'), TBytes.Create($4D, $5A, $03));
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'output', 'plugin.dll'), TBytes.Create($4D, $5A, $04));
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'output', 'nested', 'old.exe'), TBytes.Create($4D, $5A, $05));
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'staging', 'extra.dll'), TBytes.Create($4D, $5A, $06));
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'staging', 'nested', 'deep.dll'), TBytes.Create($4D, $5A, $07));
+  TFile.WriteAllText(TPath.Combine(LRoot, 'MyApp.map'), 'map', TEncoding.UTF8);
+  TFile.WriteAllText(TPath.Combine(LRoot, 'output', 'MyApp.map'), 'map', TEncoding.UTF8);
+end;
+
+function TEngineTests.ScopeConfig: TSbomConfig;
+begin
+  Result := TSbomConfig.Default;
+  Result.OutputPath := FOutputFile;
+  Result.IncludeCompositionEvidence := False;
+  Result.Platform := 'Win32';
+  Result.Configuration := 'Release';
+end;
+
+function TEngineTests.CountComponents(const AJson: TJSONObject;
+  const AName: string): NativeInt;
+var
+  LComponents: TJSONArray;
+  LComponent: TJSONObject;
+  I: Integer;
+begin
+  Result := 0;
+  if not Assigned(AJson) then
+    Exit;
+  LComponents := AJson.GetValue('components') as TJSONArray;
+  if not Assigned(LComponents) then
+    Exit;
+  for I := 0 to LComponents.Count - 1 do
+  begin
+    if not (LComponents.Items[I] is TJSONObject) then
+      Continue;
+    LComponent := TJSONObject(LComponents.Items[I]);
+    if SameText(LComponent.GetValue<string>('name', ''), AName) then
+      Inc(Result);
+  end;
+end;
+
+function TEngineTests.ComponentVersion(const AJson: TJSONObject;
+  const AName: string): string;
+begin
+  Result := '';
+  if not Assigned(AJson) then
+    Exit;
+  var LComponents := AJson.GetValue('components') as TJSONArray;
+  if not Assigned(LComponents) then
+    Exit;
+  for var i := 0 to LComponents.Count - 1 do
+  begin
+    if not (LComponents.Items[i] is TJSONObject) then
+      Continue;
+    var LComponent := TJSONObject(LComponents.Items[i]);
+    if not SameText(LComponent.GetValue<string>('name', ''), AName) then
+      Continue;
+    if LComponent.GetValue('version') = nil then
+      Exit('');
+    Exit(LComponent.GetValue<string>('version'));
+  end;
+end;
+
+function TEngineTests.ComponentHasHash(const AJson: TJSONObject;
+  const AName: string): Boolean;
+var
+  LComponents: TJSONArray;
+  LComponent: TJSONObject;
+  I: Integer;
+begin
+  Result := False;
+  if not Assigned(AJson) then
+    Exit;
+  LComponents := AJson.GetValue('components') as TJSONArray;
+  if not Assigned(LComponents) then
+    Exit;
+  for I := 0 to LComponents.Count - 1 do
+  begin
+    if not (LComponents.Items[I] is TJSONObject) then
+      Continue;
+    LComponent := TJSONObject(LComponents.Items[I]);
+    if SameText(LComponent.GetValue<string>('name', ''), AName) and
+       (LComponent.GetValue('hashes') <> nil) then
+      Exit(True);
+  end;
+end;
+
+function TEngineTests.GenerateScope(const AProjectPath: string;
+  const AConfig: TSbomConfig): TJSONObject;
+var
+  LGen: TDxComplyGenerator;
+begin
+  LGen := TDxComplyGenerator.Create(AConfig);
+  try
+    LGen.OnProgress := OnProgress;
+    Assert.IsTrue(LGen.Generate(AProjectPath, FOutputFile, sfCycloneDxJson),
+      'Generate must succeed for the scope fixture');
+    Result := TJSONObject.ParseJSONValue(
+      TFile.ReadAllText(FOutputFile, TEncoding.UTF8)) as TJSONObject;
+    Assert.IsNotNull(Result, 'SBOM must be JSON');
+  finally
+    LGen.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_OutputScope_ListsNamedOutputAndSiblingsOnly;
+var
+  LConfig: TSbomConfig;
+  LJson: TJSONObject;
+  LProject: string;
+begin
+  LProject := CreateScopeProject('with-output', True);
+  LConfig := ScopeConfig;
+  LJson := GenerateScope(LProject, LConfig);
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'MyApp.exe'),
+      'The named exe in the output directory must be listed once');
+    Assert.IsTrue(ComponentHasHash(LJson, 'MyApp.exe'),
+      'The named exe must be hashed when the file exists');
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'plugin.dll'),
+      'A DLL beside the exe must be listed');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'old.exe'),
+      'A binary in a subdirectory of the output directory must not be listed');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'setup.exe'),
+      'A binary under setup\ must not be listed');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'extra.dll'),
+      'A staged directory must not be scanned unless scanDirs says so');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_OutputScope_MissingNamedFile_HasNoHash;
+var
+  LConfig: TSbomConfig;
+  LJson: TJSONObject;
+  LProject: string;
+  LRoot: string;
+begin
+  LProject := CreateScopeProject('missing-exe', True);
+  LRoot := TPath.GetDirectoryName(LProject);
+  TFile.Delete(TPath.Combine(LRoot, 'output', 'MyApp.exe'));
+
+  LConfig := ScopeConfig;
+  LJson := GenerateScope(LProject, LConfig);
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'MyApp.exe'),
+      'The named output must stay in the SBOM when the file is missing');
+    Assert.IsFalse(ComponentHasHash(LJson, 'MyApp.exe'),
+      'A missing output file must not be given a hash');
+    Assert.IsTrue(ComponentHasHash(LJson, 'plugin.dll'),
+      'A sibling that does exist must still be hashed');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_OutputScope_KeepsDeclaredDependencies;
+var
+  LConfig: TSbomConfig;
+  LJson: TJSONObject;
+  LProject: string;
+begin
+  LProject := CreateScopeProject('declared', True);
+  LConfig := ScopeConfig;
+  LJson := GenerateScope(LProject, LConfig);
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'rtl.bpl'),
+      'A declared runtime package must be listed even when the BPL was not scanned');
+    Assert.IsFalse(ComponentHasHash(LJson, 'rtl.bpl'),
+      'A runtime package that was not found on disk has no hash');
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'notshipped.dll'),
+      'An external DLL from source must be listed even when the file was not scanned');
+    Assert.IsFalse(ComponentHasHash(LJson, 'notshipped.dll'),
+      'An external DLL that was not found on disk has no hash');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_OutputScope_ExcludeFiltersScannedFiles;
+var
+  LConfig: TSbomConfig;
+  LJson: TJSONObject;
+  LProject: string;
+begin
+  LProject := CreateScopeProject('exclude', True);
+  LConfig := ScopeConfig;
+  LConfig.ExcludePatterns := TArray<string>.Create('*.dll');
+  LJson := GenerateScope(LProject, LConfig);
+  try
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'plugin.dll'),
+      'An exclude glob must drop a DLL found in the output directory');
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'MyApp.exe'),
+      'The named exe must remain when the exclude glob does not match it');
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'notshipped.dll'),
+      'An external DLL reference is not removed by an artefact exclude glob');
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'rtl.bpl'),
+      'A runtime package is not removed by an artefact exclude glob');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_OutputScope_ScanDirRespectsRecursion;
+var
+  LConfig: TSbomConfig;
+  LJson: TJSONObject;
+  LProject: string;
+begin
+  LProject := CreateScopeProject('scan-dir', True);
+  LConfig := ScopeConfig;
+  LConfig.ScanDirs := TArray<string>.Create('staging');
+  LJson := GenerateScope(LProject, LConfig);
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'extra.dll'),
+      'scanDirs must include binaries directly in that directory');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'deep.dll'),
+      'scanDirs must not walk subdirectories unless the value contains **');
+  finally
+    LJson.Free;
+  end;
+
+  LConfig.ScanDirs := TArray<string>.Create('staging\**');
+  LJson := GenerateScope(LProject, LConfig);
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'deep.dll'),
+      'A scanDirs value that contains ** must include nested binaries');
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'extra.dll'),
+      'A recursive scan dir must still include binaries in the directory itself');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_OutputScope_ScanTreeWalksOutputDirectory;
+var
+  LConfig: TSbomConfig;
+  LJson: TJSONObject;
+  LProject: string;
+begin
+  LProject := CreateScopeProject('scan-tree', True);
+  LConfig := ScopeConfig;
+  LConfig.ScanTree := True;
+  FProgressMessages.Clear;
+  LJson := GenerateScope(LProject, LConfig);
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'old.exe'),
+      'scanTree must include binaries under the output directory');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'setup.exe'),
+      'scanTree walks the output directory, not folders outside it');
+    Assert.IsTrue(Pos('deprecated', FProgressMessages.Text) > 0,
+      'scanTree must be reported as deprecated');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_OutputScope_ProjectDirFallbackSkipsSubfolders;
+var
+  LConfig: TSbomConfig;
+  LJson: TJSONObject;
+  LProject: string;
+begin
+  LProject := CreateScopeProject('fallback', False);
+  LConfig := ScopeConfig;
+  LJson := GenerateScope(LProject, LConfig);
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'MyApp.exe'),
+      'With no output directory, the exe in the project directory is the named output');
+    Assert.IsTrue(ComponentHasHash(LJson, 'MyApp.exe'),
+      'That exe must be hashed');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'setup.exe'),
+      'Subfolders of the project directory must not be scanned by default');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'plugin.dll'),
+      'Binaries under output\ must not be scanned when that folder is not the output directory');
+  finally
+    LJson.Free;
+  end;
+
+  LConfig.ScanTree := True;
+  LJson := GenerateScope(LProject, LConfig);
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'setup.exe'),
+      'scanTree on a project without an output directory walks the project tree');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.Generate_OutputScope_PackageUsesBplDirectory;
+var
+  LConfig: TSbomConfig;
+  LJson: TJSONObject;
+  LProject: string;
+  LRoot: string;
+begin
+  LRoot := TPath.Combine(FTempDir, 'package');
+  TDirectory.CreateDirectory(TPath.Combine(LRoot, 'bin'));
+  TDirectory.CreateDirectory(TPath.Combine(LRoot, 'bpl'));
+  TDirectory.CreateDirectory(TPath.Combine(LRoot, 'bpl', 'nested'));
+  TFile.WriteAllText(TPath.Combine(LRoot, 'Demo.dpk'),
+    'package Demo;' + sLineBreak + 'end.' + sLineBreak, TEncoding.UTF8);
+  TFile.WriteAllText(TPath.Combine(LRoot, 'Demo.dproj'),
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>Demo.dpk</MainSource>' + sLineBreak +
+    '    <AppType>Package</AppType>' + sLineBreak +
+    '    <DllSuffix>290</DllSuffix>' + sLineBreak +
+    '    <DCC_ExeOutput>.\bin</DCC_ExeOutput>' + sLineBreak +
+    '    <DCC_BplOutput>.\bpl</DCC_BplOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>', TEncoding.UTF8);
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'bin', 'stray.exe'), TBytes.Create($4D, $5A, $11));
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'bpl', 'Demo290.bpl'), TBytes.Create($4D, $5A, $12));
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'bpl', 'plugin.dll'), TBytes.Create($4D, $5A, $13));
+  TFile.WriteAllBytes(TPath.Combine(LRoot, 'bpl', 'nested', 'old.bpl'), TBytes.Create($4D, $5A, $14));
+  // OutputDir prefers the exe folder, so the expected map lives there.
+  TFile.WriteAllText(TPath.Combine(LRoot, 'bin', 'Demo290.map'), 'map', TEncoding.UTF8);
+
+  LProject := TPath.Combine(LRoot, 'Demo.dproj');
+  LConfig := ScopeConfig;
+  LJson := GenerateScope(LProject, LConfig);
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'Demo290.bpl'),
+      'The package output must be listed under its DllSuffix name');
+    Assert.IsTrue(ComponentHasHash(LJson, 'Demo290.bpl'),
+      'The package output must be hashed when the BPL exists');
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'plugin.dll'),
+      'A DLL beside the BPL must be listed');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'stray.exe'),
+      'Binaries in DCC_ExeOutput must not be listed when the package output is the BPL directory');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'old.bpl'),
+      'A nested BPL must not be listed');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.GenerateFromConfig_ScanDirs_AddsStagedBinaries;
+var
+  LConfigJson: TStringList;
+  LConfigPath: string;
+  LGen: TDxComplyGenerator;
+  LJson: TJSONObject;
+  LProject: string;
+begin
+  LProject := CreateScopeProject('json-scan-dir', True);
+  LConfigPath := TPath.Combine(FTempDir, 'scan-dirs.json');
+  LConfigJson := TStringList.Create;
+  try
+    LConfigJson.Add('{');
+    LConfigJson.Add('  "output": "' + StringReplace(FOutputFile, '\', '\\', [rfReplaceAll]) + '",');
+    LConfigJson.Add('  "includeCompositionEvidence": false,');
+    LConfigJson.Add('  "scanDirs": ["staging"],');
+    LConfigJson.Add('  "scanTree": false');
+    LConfigJson.Add('}');
+    LConfigJson.SaveToFile(LConfigPath, TEncoding.UTF8);
+  finally
+    LConfigJson.Free;
+  end;
+
+  LGen := TDxComplyGenerator.Create;
+  try
+    LGen.OnProgress := OnProgress;
+    Assert.IsTrue(LGen.GenerateFromConfig(LProject, LConfigPath),
+      'GenerateFromConfig must succeed when scanDirs is set');
+  finally
+    LGen.Free;
+  end;
+
+  LJson := TJSONObject.ParseJSONValue(TFile.ReadAllText(FOutputFile, TEncoding.UTF8)) as TJSONObject;
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'extra.dll'),
+      'scanDirs in .dxcomply.json must add binaries from that directory');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'deep.dll'),
+      'A scanDirs entry without ** must not include nested binaries');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'setup.exe'),
+      'scanDirs must not bring back the recursive project walk');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.GenerateFromConfig_ScanTree_RestoresRecursiveWalk;
+var
+  LConfigJson: TStringList;
+  LConfigPath: string;
+  LGen: TDxComplyGenerator;
+  LJson: TJSONObject;
+  LProject: string;
+begin
+  LProject := CreateScopeProject('json-scan-tree', True);
+  LConfigPath := TPath.Combine(FTempDir, 'scan-tree.json');
+  LConfigJson := TStringList.Create;
+  try
+    LConfigJson.Add('{');
+    LConfigJson.Add('  "output": "' + StringReplace(FOutputFile, '\', '\\', [rfReplaceAll]) + '",');
+    LConfigJson.Add('  "includeCompositionEvidence": false,');
+    LConfigJson.Add('  "scanTree": true');
+    LConfigJson.Add('}');
+    LConfigJson.SaveToFile(LConfigPath, TEncoding.UTF8);
+  finally
+    LConfigJson.Free;
+  end;
+
+  FProgressMessages.Clear;
+  LGen := TDxComplyGenerator.Create;
+  try
+    LGen.OnProgress := OnProgress;
+    Assert.IsTrue(LGen.GenerateFromConfig(LProject, LConfigPath),
+      'GenerateFromConfig must succeed when scanTree is set');
+  finally
+    LGen.Free;
+  end;
+
+  LJson := TJSONObject.ParseJSONValue(TFile.ReadAllText(FOutputFile, TEncoding.UTF8)) as TJSONObject;
+  try
+    Assert.AreEqual(NativeInt(1), CountComponents(LJson, 'old.exe'),
+      'scanTree in .dxcomply.json must walk the output directory');
+    Assert.AreEqual(NativeInt(0), CountComponents(LJson, 'setup.exe'),
+      'scanTree must not include folders outside the output directory');
+    Assert.IsTrue(Pos('deprecated', FProgressMessages.Text) > 0,
+      'scanTree from config must be reported as deprecated');
+  finally
+    LJson.Free;
+  end;
+end;
+
+function VersionFixture(const AFileName: string): string;
+begin
+  Result := TPath.Combine(RepoRoot, 'tests' + PathDelim + 'fixtures' +
+    PathDelim + 'binaries' + PathDelim + AFileName);
+end;
+
+function IsRfc3339Utc(const AValue: string): Boolean;
+begin
+  Result := TRegEx.IsMatch(AValue, '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$');
+end;
+
+function FileDateVersion(const APath: string): string;
+begin
+  Result := FormatRfc3339Utc(TFile.GetLastWriteTimeUtc(APath));
+end;
+
+procedure TEngineTests.Generate_NeighborExe_UsesOwnVersionOrNa;
+const
+  cProjectVersion = '26.12.0.0';
+  cVendorVersion = '9.8.7.6';
+begin
+  var LNoVersion := VersionFixture('FakeNoVersion.exe');
+  var LWithVersion := VersionFixture('FakeWithVersion.exe');
+  Assert.IsTrue(TFile.Exists(LNoVersion), LNoVersion);
+  Assert.IsTrue(TFile.Exists(LWithVersion), LWithVersion);
+
+  var LProject := CreateScopeProject('neighbor-exe', True);
+  var LOutput := TPath.Combine(TPath.GetDirectoryName(LProject), 'output');
+  // The primary output and the neighbor without a version resource are the
+  // same bytes. Only the file the .dproj builds may take the project version.
+  TFile.Copy(LNoVersion, TPath.Combine(LOutput, 'MyApp.exe'), True);
+  TFile.Copy(LNoVersion, TPath.Combine(LOutput, 'ThirdParty.exe'), True);
+  TFile.Copy(LWithVersion, TPath.Combine(LOutput, 'Vendor.exe'), True);
+  TFile.Copy(LNoVersion, TPath.Combine(LOutput, 'plugin.dll'), True);
+
+  var LProjectText := TFile.ReadAllText(LProject, TEncoding.UTF8);
+  LProjectText := StringReplace(LProjectText, '<AppType>Application</AppType>',
+    '<AppType>Application</AppType>' + sLineBreak +
+    '    <VerInfo_MajorVer>26</VerInfo_MajorVer>' + sLineBreak +
+    '    <VerInfo_MinorVer>12</VerInfo_MinorVer>' + sLineBreak +
+    '    <VerInfo_Release>0</VerInfo_Release>' + sLineBreak +
+    '    <VerInfo_Build>0</VerInfo_Build>', []);
+  Assert.IsTrue(Pos('VerInfo_MajorVer', LProjectText) > 0,
+    'the fixture project must carry a project version');
+  TFile.WriteAllText(LProject, LProjectText, TEncoding.UTF8);
+
+  var LConfig := ScopeConfig;
+  LConfig.HumanReadableReport.Enabled := True;
+  LConfig.HumanReadableReport.Format := hrfMarkdown;
+  LConfig.HumanReadableReport.OutputBasePath :=
+    TPath.Combine(FTempDir, 'neighbor-exe.report');
+  var LJson := GenerateScope(LProject, LConfig);
+  try
+    var LMetadata := LJson.GetValue('metadata') as TJSONObject;
+    var LRoot := LMetadata.GetValue('component') as TJSONObject;
+    Assert.AreEqual(cProjectVersion, LRoot.GetValue<string>('version'),
+      'the SBOM root version is the project version');
+    Assert.AreEqual(cProjectVersion, ComponentVersion(LJson, 'MyApp.exe'),
+      'the primary EXE keeps the project version');
+    Assert.IsTrue(IsRfc3339Utc(ComponentVersion(LJson, 'ThirdParty.exe')),
+      'a neighboring EXE without version info gets its file date as version');
+    Assert.AreEqual(cVendorVersion, ComponentVersion(LJson, 'Vendor.exe'),
+      'a neighboring EXE keeps its own FileVersion');
+    Assert.IsTrue(Pos('"' + cVersionSourceProperty + '","value":"' + cVersionSourceFileDate + '"',
+      LJson.ToJSON) > 0, 'a file date version is marked with the versionSource property');
+    Assert.AreEqual(FileDateVersion(TPath.Combine(LOutput, 'plugin.dll')),
+      ComponentVersion(LJson, 'plugin.dll'), 'a DLL without version info gets its file date as version');
+  finally
+    LJson.Free;
+  end;
+
+  var LReportText := TFile.ReadAllText(
+    TPath.Combine(FTempDir, 'neighbor-exe.report.md'), TEncoding.UTF8);
+  Assert.IsTrue(Pos('| MyApp.exe | application | ' + cProjectVersion + ' |',
+    LReportText) > 0, 'the report shows the project version on the primary EXE');
+  Assert.IsTrue(Pos('| ThirdParty.exe | application | ' +
+    FileDateVersion(TPath.Combine(LOutput, 'ThirdParty.exe')) + ' |', LReportText) > 0,
+    'the report shows the file date for a neighboring EXE without version info');
+  Assert.IsTrue(Pos('| Vendor.exe | application | ' + cVendorVersion + ' |',
+    LReportText) > 0, 'the report shows the neighboring EXE''s own version');
+  Assert.IsTrue(Pos('| plugin.dll | library | ' +
+    FileDateVersion(TPath.Combine(LOutput, 'plugin.dll')) + ' |', LReportText) > 0,
+    'the report shows the file date for a DLL without version info');
+end;
+
+function JsonBomRefEnding(const AJson: TJSONObject; const AFileName: string): string;
+var
+  LComponents: TJSONArray;
+  LComponent: TJSONObject;
+  LName, LSuffix: string;
+  I: Integer;
+begin
+  Result := '';
+  LComponents := AJson.GetValue('components') as TJSONArray;
+  if not Assigned(LComponents) then
+    Exit;
+  LSuffix := '/' + AFileName;
+  for I := 0 to LComponents.Count - 1 do
+  begin
+    LComponent := LComponents.Items[I] as TJSONObject;
+    LName := LComponent.GetValue<string>('name', '');
+    if SameText(LName, AFileName) or
+       SameText(Copy(LName, Length(LName) - Length(AFileName), MaxInt), LSuffix) or
+       SameText(Copy(LName, Length(LName) - Length(AFileName), MaxInt), '\' + AFileName) then
+      Exit(LComponent.GetValue<string>('bom-ref', ''));
+  end;
+end;
+
+function JsonDependsOn(const AJson: TJSONObject; const ARef: string): TJSONArray;
+var
+  LDeps: TJSONArray;
+  LDep: TJSONObject;
+  I: Integer;
+begin
+  Result := nil;
+  LDeps := AJson.GetValue('dependencies') as TJSONArray;
+  if not Assigned(LDeps) then
+    Exit;
+  for I := 0 to LDeps.Count - 1 do
+  begin
+    LDep := LDeps.Items[I] as TJSONObject;
+    if SameText(LDep.GetValue<string>('ref', ''), ARef) then
+      Exit(LDep.GetValue('dependsOn') as TJSONArray);
+  end;
+end;
+
+function JsonDependsHas(const ADepends: TJSONArray; const ARef: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  if not Assigned(ADepends) or (ARef = '') then
+    Exit;
+  for I := 0 to ADepends.Count - 1 do
+    if ADepends.Items[I].Value = ARef then
+      Exit(True);
+end;
+
+procedure WriteChainUnit(const ADir, AName, AUsesName: string);
+var
+  LUses: string;
+begin
+  LUses := '';
+  if AUsesName <> '' then
+    LUses := 'uses ' + AUsesName + ';' + sLineBreak;
+  TFile.WriteAllText(TPath.Combine(ADir, AName + '.pas'),
+    'unit ' + AName + ';' + sLineBreak +
+    'interface' + sLineBreak +
+    LUses +
+    'implementation' + sLineBreak +
+    'end.' + sLineBreak, TEncoding.UTF8);
+end;
+
+procedure TEngineTests.Generate_MapUsesGraph_IsMultiLevel;
+var
+  LRoot, LOut, LProject, LContent: string;
+  LConfig: TSbomConfig;
+  LGen: TDxComplyGenerator;
+  LJson: TJSONObject;
+  LExe, LA, LB, LC: string;
+  LDepends: TJSONArray;
+begin
+  LRoot := TPath.Combine(FTempDir, 'usesgraph');
+  LOut := TPath.Combine(LRoot, 'out');
+  TDirectory.CreateDirectory(LOut);
+  TFile.WriteAllText(TPath.Combine(LRoot, 'GraphApp.dpr'),
+    'program GraphApp;' + sLineBreak + 'begin' + sLineBreak + 'end.' + sLineBreak,
+    TEncoding.UTF8);
+  WriteChainUnit(LRoot, 'UnitA', 'UnitB');
+  WriteChainUnit(LRoot, 'UnitB', 'UnitC');
+  WriteChainUnit(LRoot, 'UnitC', '');
+  TFile.WriteAllText(TPath.Combine(LRoot, 'GraphApp.dproj'),
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>GraphApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Console</AppType>' + sLineBreak +
+    '    <TargetedPlatforms>1</TargetedPlatforms>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '  <PropertyGroup Condition="''$(Base)''!=''''">' + sLineBreak +
+    '    <DCC_ExeOutput>.\out</DCC_ExeOutput>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>' + sLineBreak, TEncoding.UTF8);
+  TFile.WriteAllBytes(TPath.Combine(LOut, 'GraphApp.exe'), TBytes.Create($4D, $5A, $01));
+  TFile.WriteAllText(TPath.Combine(LOut, 'GraphApp.map'),
+    '  Line numbers for UnitA(UnitA.pas) segment .text' + sLineBreak +
+    '  Line numbers for UnitB(UnitB.pas) segment .text' + sLineBreak +
+    '  Line numbers for UnitC(UnitC.pas) segment .text' + sLineBreak,
+    TEncoding.UTF8);
+  LProject := TPath.Combine(LRoot, 'GraphApp.dproj');
+
+  LConfig := TSbomConfig.Default;
+  LConfig.OutputPath := FOutputFile;
+  LConfig.Configuration := 'Release';
+  LConfig.Platform := 'Win32';
+
+  LGen := TDxComplyGenerator.Create(LConfig);
+  try
+    LGen.OnProgress := OnProgress;
+    Assert.IsTrue(LGen.Generate(LProject, FOutputFile, sfCycloneDxJson),
+      'Generate must succeed. Progress: ' + FProgressMessages.Text);
+  finally
+    LGen.Free;
+  end;
+
+  LContent := TFile.ReadAllText(FOutputFile, TEncoding.UTF8);
+  LJson := TJSONObject.ParseJSONValue(LContent) as TJSONObject;
+  try
+    Assert.IsNotNull(LJson, LContent);
+    LExe := JsonBomRefEnding(LJson, 'GraphApp.exe');
+    LA := JsonBomRefEnding(LJson, 'UnitA.pas');
+    LB := JsonBomRefEnding(LJson, 'UnitB.pas');
+    LC := JsonBomRefEnding(LJson, 'UnitC.pas');
+    Assert.AreNotEqual('', LExe, 'the program must be a component');
+    Assert.AreNotEqual('', LA, 'UnitA must be a component. Progress: ' + FProgressMessages.Text);
+    Assert.AreNotEqual('', LB);
+    Assert.AreNotEqual('', LC);
+
+    LDepends := JsonDependsOn(LJson, LExe);
+    Assert.IsTrue(JsonDependsHas(LDepends, LA),
+      'the program depends on UnitA');
+    Assert.IsFalse(JsonDependsHas(LDepends, LB),
+      'UnitB is reached through UnitA');
+    Assert.IsFalse(JsonDependsHas(LDepends, LC),
+      'UnitC is reached through UnitB');
+
+    LDepends := JsonDependsOn(LJson, LA);
+    Assert.IsTrue(JsonDependsHas(LDepends, LB), 'UnitA depends on UnitB');
+    Assert.IsFalse(JsonDependsHas(LDepends, LC), 'UnitA does not depend on UnitC');
+    LDepends := JsonDependsOn(LJson, LB);
+    Assert.IsTrue(JsonDependsHas(LDepends, LC), 'UnitB depends on UnitC');
+    Assert.IsNull(JsonDependsOn(LJson, LC), 'UnitC has no dependsOn entry');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TEngineTests.GenerateLibrary_UsesGraph_IsMultiLevel;
+var
+  LRoot, LSrc, LProject, LContent: string;
+  LConfig: TSbomConfig;
+  LGen: TDxComplyGenerator;
+  LJson: TJSONObject;
+  LDpr, LA, LB, LC: string;
+  LDepends: TJSONArray;
+begin
+  LRoot := TPath.Combine(FTempDir, 'libgraph');
+  LSrc := TPath.Combine(LRoot, 'src');
+  TDirectory.CreateDirectory(LSrc);
+  TFile.WriteAllText(TPath.Combine(LSrc, 'GraphApp.dpr'),
+    'program GraphApp;' + sLineBreak +
+    'uses' + sLineBreak +
+    '  UnitA in ''UnitA.pas'';' + sLineBreak +
+    'begin' + sLineBreak +
+    'end.' + sLineBreak, TEncoding.UTF8);
+  WriteChainUnit(LSrc, 'UnitA', 'UnitB');
+  WriteChainUnit(LSrc, 'UnitB', 'UnitC');
+  WriteChainUnit(LSrc, 'UnitC', '');
+  TFile.WriteAllText(TPath.Combine(LRoot, 'GraphApp.dproj'),
+    '<?xml version="1.0" encoding="utf-8"?>' + sLineBreak +
+    '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">' + sLineBreak +
+    '  <PropertyGroup>' + sLineBreak +
+    '    <MainSource>src\GraphApp.dpr</MainSource>' + sLineBreak +
+    '    <AppType>Console</AppType>' + sLineBreak +
+    '  </PropertyGroup>' + sLineBreak +
+    '</Project>' + sLineBreak, TEncoding.UTF8);
+  LProject := TPath.Combine(LRoot, 'GraphApp.dproj');
+
+  LConfig := TSbomConfig.Default;
+  LConfig.OutputPath := FOutputFile;
+  LConfig.LibraryMode := True;
+  LConfig.SourceDirs := TArray<string>.Create(LSrc);
+  LConfig.ProductVersion := '1.2.3';
+
+  LGen := TDxComplyGenerator.Create(LConfig);
+  try
+    LGen.OnProgress := OnProgress;
+    Assert.IsTrue(LGen.Generate(LProject, FOutputFile, sfCycloneDxJson),
+      'Generate must succeed. Progress: ' + FProgressMessages.Text);
+  finally
+    LGen.Free;
+  end;
+
+  LContent := TFile.ReadAllText(FOutputFile, TEncoding.UTF8);
+  LJson := TJSONObject.ParseJSONValue(LContent) as TJSONObject;
+  try
+    Assert.IsNotNull(LJson, LContent);
+    LDpr := JsonBomRefEnding(LJson, 'GraphApp.dpr');
+    LA := JsonBomRefEnding(LJson, 'UnitA.pas');
+    LB := JsonBomRefEnding(LJson, 'UnitB.pas');
+    LC := JsonBomRefEnding(LJson, 'UnitC.pas');
+    Assert.AreNotEqual('', LDpr, LContent);
+    Assert.AreNotEqual('', LA);
+    Assert.AreNotEqual('', LB);
+    Assert.AreNotEqual('', LC);
+
+    LDepends := JsonDependsOn(LJson, 'GraphApp');
+    Assert.IsTrue(JsonDependsHas(LDepends, LDpr),
+      'the library depends on GraphApp.dpr');
+    Assert.IsFalse(JsonDependsHas(LDepends, LA),
+      'UnitA is reached through the program');
+    Assert.IsFalse(JsonDependsHas(LDepends, LB));
+    Assert.IsFalse(JsonDependsHas(LDepends, LC));
+
+    LDepends := JsonDependsOn(LJson, LDpr);
+    Assert.IsTrue(JsonDependsHas(LDepends, LA), 'GraphApp.dpr depends on UnitA');
+    Assert.IsFalse(JsonDependsHas(LDepends, LB));
+    LDepends := JsonDependsOn(LJson, LA);
+    Assert.IsTrue(JsonDependsHas(LDepends, LB), 'UnitA depends on UnitB');
+    LDepends := JsonDependsOn(LJson, LB);
+    Assert.IsTrue(JsonDependsHas(LDepends, LC), 'UnitB depends on UnitC');
+  finally
+    LJson.Free;
+  end;
+end;
+
+{ TBuildFileVersionTests }
+
+function MakeBuildArtefact(const APath, AType, AVersion: string): TArtefactInfo;
+begin
+  Result := Default(TArtefactInfo);
+  Result.RelativePath := APath;
+  Result.FilePath := 'C:\Build\' + APath;
+  Result.ArtefactType := AType;
+  Result.Version := AVersion;
+  Result.Hash := StringOfChar('a', 64);
+end;
+
+procedure TBuildFileVersionTests.Apply_ScannedFiles_GetProductVersion;
+var
+  LList: TArtefactList;
+begin
+  LList := TArtefactList.Create;
+  try
+    LList.Add(MakeBuildArtefact('App.exe', 'application', ''));
+    LList.Add(MakeBuildArtefact('MyPkg.bpl', 'package', ''));
+    LList.Add(MakeBuildArtefact('MyPkg.dcp', 'dcu-package', ''));
+    LList.Add(MakeBuildArtefact('data.res', 'resource', ''));
+    LList.Add(MakeBuildArtefact('readme.txt', 'unknown', ''));
+    // MyPkg.bpl is the project's own output. App.exe only sits beside it.
+    ApplyProductVersionToBuildFiles(LList, ' 2.1.0 ', 'C:\Build\MyPkg.bpl');
+    Assert.AreEqual('', LList[0].Version,
+      'a neighboring EXE does not inherit the project version');
+    Assert.AreEqual('2.1.0', LList[1].Version);
+    Assert.AreEqual('2.1.0', LList[2].Version);
+    Assert.AreEqual('', LList[3].Version, 'a resource is not a product output');
+    Assert.AreEqual('', LList[4].Version, 'an unknown file is not a product output');
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_NonProductArtefacts_Unchanged;
+var
+  LList: TArtefactList;
+  LSource: TArtefactInfo;
+begin
+  LList := TArtefactList.Create;
+  try
+    LList.Add(MakeBuildArtefact('System.SysUtils.dcu', 'unit-evidence', ''));
+    LList.Add(MakeBuildArtefact('rtl290.bpl', 'runtime-package', ''));
+    LList.Add(MakeBuildArtefact('sqlite3.dll', 'external-reference', ''));
+    LSource := MakeBuildArtefact('src/A.pas', 'file', '');
+    LSource.LibrarySourceFile := True;
+    LList.Add(LSource);
+    LList.Add(MakeBuildArtefact('', 'application', ''));
+    ApplyProductVersionToBuildFiles(LList, '2.1.0');
+    Assert.AreEqual('', LList[0].Version);
+    Assert.AreEqual('', LList[1].Version);
+    Assert.AreEqual('', LList[2].Version);
+    Assert.AreEqual('', LList[3].Version);
+    Assert.AreEqual('', LList[4].Version);
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_ExistingVersion_Kept;
+var
+  LList: TArtefactList;
+begin
+  LList := TArtefactList.Create;
+  try
+    LList.Add(MakeBuildArtefact('vendor.dll', 'library', '5.0'));
+    ApplyProductVersionToBuildFiles(LList, '2.1.0');
+    Assert.AreEqual('5.0', LList[0].Version);
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_EmptyVersion_ChangesNothing;
+var
+  LList: TArtefactList;
+begin
+  LList := TArtefactList.Create;
+  try
+    LList.Add(MakeBuildArtefact('App.exe', 'application', ''));
+    ApplyProductVersionToBuildFiles(LList, '');
+    Assert.AreEqual('', LList[0].Version);
+  finally
+    LList.Free;
+  end;
+end;
+
+
+function SystemDllPath: string;
+begin
+  // kernel32.dll always has a version resource. A Win32 process sees the
+  // SysWOW64 copy through redirection; either copy works here.
+  Result := TPath.Combine(GetEnvironmentVariable('SystemRoot'), 'System32\kernel32.dll');
+end;
+
+function NewDllWithoutResource: string;
+begin
+  Result := TPath.Combine(TPath.GetTempPath,
+    'dxc-noversion-' + TGUID.NewGuid.ToString.Replace('{', '').Replace('}', '') + '.dll');
+  TFile.WriteAllText(Result, 'not a PE file');
+end;
+
+procedure TBuildFileVersionTests.GetFileVersionText_SystemDll_ReturnsVersion;
+var
+  LVersion: string;
+begin
+  LVersion := GetFileVersionText(SystemDllPath);
+  Assert.IsTrue(LVersion <> '', 'kernel32.dll must report a version');
+  Assert.IsTrue(CharInSet(LVersion[1], ['0'..'9']), LVersion);
+end;
+
+procedure TBuildFileVersionTests.GetFileVersionText_NoResource_ReturnsEmpty;
+var
+  LPath: string;
+begin
+  LPath := NewDllWithoutResource;
+  try
+    Assert.AreEqual('', GetFileVersionText(LPath));
+  finally
+    TFile.Delete(LPath);
+  end;
+end;
+
+procedure TBuildFileVersionTests.GetFileVersionText_MissingFile_ReturnsEmpty;
+begin
+  Assert.AreEqual('', GetFileVersionText('C:\does-not-exist\nothing.dll'));
+  Assert.AreEqual('', GetFileVersionText(''));
+end;
+
+procedure TBuildFileVersionTests.Apply_ThirdPartyDll_GetsOwnVersion;
+var
+  LList: TArtefactList;
+  LArtefact: TArtefactInfo;
+begin
+  LList := TArtefactList.Create;
+  try
+    LArtefact := MakeBuildArtefact('kernel32.dll', 'library', '');
+    LArtefact.FilePath := SystemDllPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '2.1.0', 'C:\Build\App.exe');
+    Assert.AreEqual(GetFileVersionText(SystemDllPath), LList[0].Version);
+    Assert.AreNotEqual('2.1.0', LList[0].Version);
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_ResolvedExternalDll_GetsOwnVersion;
+var
+  LList: TArtefactList;
+  LArtefact: TArtefactInfo;
+begin
+  LList := TArtefactList.Create;
+  try
+    LArtefact := MakeBuildArtefact('kernel32.dll', 'external-reference', '');
+    LArtefact.FilePath := SystemDllPath;
+    LList.Add(LArtefact);
+    // Not found on disk: only the name from source is known.
+    LArtefact := MakeBuildArtefact('missing.dll', 'external-reference', '');
+    LArtefact.FilePath := '';
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '2.1.0');
+    Assert.AreEqual(GetFileVersionText(SystemDllPath), LList[0].Version);
+    Assert.AreEqual('', LList[1].Version);
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_DllWithoutResource_GetsNoVersion;
+var
+  LList: TArtefactList;
+  LArtefact: TArtefactInfo;
+  LPath: string;
+begin
+  LPath := NewDllWithoutResource;
+  LList := TArtefactList.Create;
+  try
+    LArtefact := MakeBuildArtefact(TPath.GetFileName(LPath), 'library', '');
+    LArtefact.FilePath := LPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '2.1.0');
+    Assert.AreEqual(FileDateVersion(LPath), LList[0].Version);
+    Assert.IsTrue(LList[0].VersionFromFileDate);
+  finally
+    LList.Free;
+    TFile.Delete(LPath);
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_OwnOutputDll_GetsProductVersion;
+var
+  LList: TArtefactList;
+  LArtefact: TArtefactInfo;
+  LPath: string;
+begin
+  LPath := NewDllWithoutResource;
+  LList := TArtefactList.Create;
+  try
+    LArtefact := MakeBuildArtefact(TPath.GetFileName(LPath), 'library', '');
+    LArtefact.FilePath := LPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '2.1.0', LPath);
+    Assert.AreEqual('2.1.0', LList[0].Version);
+  finally
+    LList.Free;
+    TFile.Delete(LPath);
+  end;
+end;
+
+
+function CopyAsBpl(const ASource: string): string;
+begin
+  Result := TPath.Combine(TPath.GetTempPath,
+    'dxc-pkg-' + TGUID.NewGuid.ToString.Replace('{', '').Replace('}', '') + '.bpl');
+  if ASource <> '' then
+    TFile.Copy(ASource, Result)
+  else
+    TFile.WriteAllText(Result, 'not a PE file');
+end;
+
+procedure TBuildFileVersionTests.Apply_ThirdPartyBpl_GetsOwnVersion;
+var
+  LList: TArtefactList;
+  LArtefact: TArtefactInfo;
+  LPath: string;
+begin
+  // A copy of kernel32.dll stands in for a third-party package with a
+  // version resource.
+  LPath := CopyAsBpl(SystemDllPath);
+  LList := TArtefactList.Create;
+  try
+    LArtefact := MakeBuildArtefact(TPath.GetFileName(LPath), 'package', '');
+    LArtefact.FilePath := LPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '2.1.0', 'C:\Build\App.exe');
+    // Compare with the copy, not the system path. For a file under System32
+    // Windows can read the version strings from the language .mui file, which
+    // lags behind the binary after an update. The copy has no .mui file.
+    Assert.AreEqual(GetFileVersionText(LPath), LList[0].Version);
+    Assert.AreNotEqual('', LList[0].Version);
+    Assert.AreNotEqual('2.1.0', LList[0].Version);
+  finally
+    LList.Free;
+    TFile.Delete(LPath);
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_BplWithoutResource_GetsNoVersion;
+var
+  LList: TArtefactList;
+  LArtefact: TArtefactInfo;
+  LPath: string;
+begin
+  LPath := CopyAsBpl('');
+  LList := TArtefactList.Create;
+  try
+    LArtefact := MakeBuildArtefact(TPath.GetFileName(LPath), 'package', '');
+    LArtefact.FilePath := LPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '2.1.0', 'C:\Build\App.exe');
+    Assert.AreEqual(FileDateVersion(LPath), LList[0].Version);
+    Assert.IsTrue(LList[0].VersionFromFileDate);
+  finally
+    LList.Free;
+    TFile.Delete(LPath);
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_OwnOutputBpl_GetsProductVersion;
+var
+  LList: TArtefactList;
+  LArtefact: TArtefactInfo;
+  LPath: string;
+begin
+  LPath := CopyAsBpl(SystemDllPath);
+  LList := TArtefactList.Create;
+  try
+    LArtefact := MakeBuildArtefact(TPath.GetFileName(LPath), 'package', '');
+    LArtefact.FilePath := LPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '2.1.0', LPath);
+    Assert.AreEqual('2.1.0', LList[0].Version);
+  finally
+    LList.Free;
+    TFile.Delete(LPath);
+  end;
+end;
+procedure TBuildFileVersionTests.Apply_ExeWithoutProductVersion_GetsPeVersion;
+var
+  LList: TArtefactList;
+  LArtefact: TArtefactInfo;
+  LExe: string;
+begin
+  LExe := ParamStr(0);
+  LList := TArtefactList.Create;
+  try
+    LArtefact := MakeBuildArtefact(TPath.GetFileName(LExe), 'application', '');
+    LArtefact.FilePath := LExe;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '');
+    Assert.AreEqual(GetFileVersionText(LExe), LList[0].Version,
+      'an EXE with no product version must take FileVersion from the PE resource');
+    Assert.IsTrue(LList[0].Version <> '', 'the test EXE must have a version resource');
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_PrimaryExe_KeepsProjectVersion;
+begin
+  var LPath := VersionFixture('FakeNoVersion.exe');
+  Assert.AreEqual('', GetFileVersionText(LPath),
+    'FakeNoVersion.exe must not carry a version resource');
+  var LList := TArtefactList.Create;
+  try
+    var LArtefact := MakeBuildArtefact('MyApp.exe', 'application', '');
+    LArtefact.FilePath := LPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '26.12.0.0', LPath);
+    Assert.AreEqual('26.12.0.0', LList[0].Version,
+      'the primary EXE keeps the project version when it has no PE version');
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_PrimaryExeWithVersion_KeepsProjectVersion;
+begin
+  var LPath := VersionFixture('FakeWithVersion.exe');
+  Assert.AreEqual('9.8.7.6', GetFileVersionText(LPath),
+    'FakeWithVersion.exe FileVersion is 9.8.7.6');
+  var LList := TArtefactList.Create;
+  try
+    var LArtefact := MakeBuildArtefact('MyApp.exe', 'application', '');
+    LArtefact.FilePath := LPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '26.12.0.0', LPath);
+    Assert.AreEqual('26.12.0.0', LList[0].Version,
+      'the primary EXE keeps the project version when the PE version differs');
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_NeighborExeWithoutVersion_GetsNoVersion;
+begin
+  var LPath := VersionFixture('FakeNoVersion.exe');
+  var LList := TArtefactList.Create;
+  try
+    var LArtefact := MakeBuildArtefact('ThirdParty.exe', 'application', '');
+    LArtefact.FilePath := LPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '26.12.0.0', 'C:\Build\MyApp.exe');
+    Assert.AreEqual(FileDateVersion(LPath), LList[0].Version,
+      'a neighboring EXE without version info gets its file date as version');
+    Assert.IsTrue(LList[0].VersionFromFileDate);
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_NeighborExeWithVersion_KeepsOwnVersion;
+begin
+  var LPath := VersionFixture('FakeWithVersion.exe');
+  var LList := TArtefactList.Create;
+  try
+    var LArtefact := MakeBuildArtefact('Vendor.exe', 'application', '');
+    LArtefact.FilePath := LPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '26.12.0.0', 'C:\Build\MyApp.exe');
+    Assert.AreEqual('9.8.7.6', LList[0].Version,
+      'a neighboring EXE keeps its own FileVersion');
+    Assert.AreNotEqual('26.12.0.0', LList[0].Version);
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_ProductVersion_NotFromFileDate;
+begin
+  var LPath := NewDllWithoutResource;
+  var LList := TArtefactList.Create;
+  try
+    var LArtefact := MakeBuildArtefact(TPath.GetFileName(LPath), 'library', '');
+    LArtefact.FilePath := LPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '2.1.0', LPath);
+    Assert.AreEqual('2.1.0', LList[0].Version);
+    Assert.IsFalse(LList[0].VersionFromFileDate);
+  finally
+    LList.Free;
+    TFile.Delete(LPath);
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_SystemLocationDll_GetsNoFileDate;
+begin
+  var LPath := NewDllWithoutResource;
+  var LList := TArtefactList.Create;
+  try
+    var LArtefact := MakeBuildArtefact(TPath.GetFileName(LPath), 'external-reference', '');
+    LArtefact.FilePath := LPath;
+    LArtefact.Location := 'system';
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '2.1.0', 'C:\Build\App.exe');
+    Assert.AreEqual('', LList[0].Version);
+    Assert.IsFalse(LList[0].VersionFromFileDate);
+  finally
+    LList.Free;
+    TFile.Delete(LPath);
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_ResourceOnDisk_GetsFileDate;
+begin
+  var LPath := TPath.Combine(TPath.GetTempPath,
+    'dxc-res-' + TGUID.NewGuid.ToString.Replace('{', '').Replace('}', '') + '.res');
+  TFile.WriteAllText(LPath, 'resource');
+  TFile.SetLastWriteTimeUtc(LPath, EncodeDateTime(2026, 3, 4, 5, 6, 7, 0));
+  var LList := TArtefactList.Create;
+  try
+    var LArtefact := MakeBuildArtefact(TPath.GetFileName(LPath), 'resource', '');
+    LArtefact.FilePath := LPath;
+    LList.Add(LArtefact);
+    ApplyProductVersionToBuildFiles(LList, '2.1.0', 'C:\Build\App.exe');
+    Assert.AreEqual('2026-03-04T05:06:07Z', LList[0].Version);
+    Assert.IsTrue(LList[0].VersionFromFileDate);
+  finally
+    LList.Free;
+    TFile.Delete(LPath);
+  end;
+end;
+
+procedure TBuildFileVersionTests.Apply_ThirdPartyDcp_NoProductVersion;
+begin
+  var LList := TArtefactList.Create;
+  try
+    LList.Add(MakeBuildArtefact('MyPkg.dcp', 'dcu-package', ''));
+    LList.Add(MakeBuildArtefact('VendorLib.dcp', 'dcu-package', ''));
+    ApplyProductVersionToBuildFiles(LList, '2.1.0', 'C:\Build\MyPkg290.bpl');
+    Assert.AreEqual('2.1.0', LList[0].Version, 'the own .dcp takes the product version');
+    Assert.AreEqual('', LList[1].Version, 'a third-party .dcp does not');
+    LList.Clear;
+    LList.Add(MakeBuildArtefact('VendorLib.dcp', 'dcu-package', ''));
+    ApplyProductVersionToBuildFiles(LList, '2.1.0', 'C:\Build\App.exe');
+    Assert.AreEqual('', LList[0].Version, 'an application project builds no .dcp');
+  finally
+    LList.Free;
+  end;
+end;
+
+procedure TBuildFileVersionTests.FormatRfc3339Utc_Format;
+begin
+  Assert.AreEqual('2026-11-02T09:08:07Z', FormatRfc3339Utc(EncodeDateTime(2026, 11, 2, 9, 8, 7, 500)));
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TEngineTests);
+  TDUnitX.RegisterTestFixture(TBuildFileVersionTests);
 
 end.

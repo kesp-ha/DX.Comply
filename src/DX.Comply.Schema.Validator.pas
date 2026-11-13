@@ -1,20 +1,25 @@
 /// <summary>
 /// DX.Comply.Schema.Validator
-/// Comprehensive SBOM schema validation for CycloneDX and SPDX formats.
+/// Structural check for CycloneDX and SPDX SBOM documents.
 /// </summary>
 ///
 /// <remarks>
 /// Provides TSbomValidator with deep structural validation of generated SBOMs:
-/// - CycloneDX 1.5 JSON: validates required fields, component structure, hash format
-/// - CycloneDX 1.5 XML: validates namespace, element presence, attribute correctness
+/// - CycloneDX 1.6 JSON: validates required fields, component structure, hash format
+/// - CycloneDX 1.6 XML: validates namespace, element presence, attribute correctness
 /// - SPDX 2.3 JSON: validates document structure, package fields, relationships
 ///
 /// Validation errors are collected in a TValidationResult record which contains
 /// both a pass/fail indicator and a list of human-readable error messages.
 ///
 /// Since full JSON Schema / XSD validation would require heavy external dependencies,
-/// this validator performs structural "deep checks" that cover all required fields
-/// and value constraints defined in the respective specifications.
+/// this validator performs structural checks for required fields and value
+/// constraints. CycloneDX XML checks also enforce the 1.6 child order of
+/// metadata and component. That is still not a substitute for xmllint against
+/// bom-1.6.xsd.
+///
+/// CycloneDX documents below specification version 1.6 are reported as errors,
+/// because BSI TR-03183-2 chapter 4 requires CycloneDX 1.6 or later.
 /// </remarks>
 ///
 /// <copyright>
@@ -50,7 +55,7 @@ type
   end;
 
   /// <summary>
-  /// Comprehensive SBOM schema validator for CycloneDX and SPDX formats.
+  /// Structural checker for CycloneDX and SPDX SBOM documents.
   /// </summary>
   TSbomValidator = class
   private
@@ -63,19 +68,20 @@ type
     procedure ValidateCycloneDxJsonComponent(const AComponent: TJSONObject; const AContext: string);
     procedure ValidateCycloneDxJsonComponents(const AComponents: TJSONArray);
     procedure ValidateCycloneDxJsonDependencies(const ADependencies: TJSONArray);
-    procedure ValidateSha256Hash(const AHash: string; const AContext: string);
+    procedure ValidateHashValue(const AAlgorithm, AHash, AContext: string);
     procedure ValidateSpdxJsonInternal(const AJson: TJSONObject);
     procedure ValidateSpdxJsonPackage(const APackage: TJSONObject; const AContext: string);
+    procedure ValidateSpdx3JsonInternal(const AJson: TJSONObject);
     function BuildResult: TValidationResult;
   public
     constructor Create;
     destructor Destroy; override;
     /// <summary>
-    /// Validates a CycloneDX 1.5 JSON document.
+    /// Validates a CycloneDX 1.6 JSON document.
     /// </summary>
     function ValidateCycloneDxJson(const AContent: string): TValidationResult;
     /// <summary>
-    /// Validates a CycloneDX 1.5 XML document.
+    /// Validates a CycloneDX 1.6 XML document.
     /// </summary>
     function ValidateCycloneDxXml(const AContent: string): TValidationResult;
     /// <summary>
@@ -83,12 +89,46 @@ type
     /// </summary>
     function ValidateSpdxJson(const AContent: string): TValidationResult;
     /// <summary>
+    /// Validates the structure of an SPDX 3.0.1 JSON-LD document (issue #108):
+    /// context, graph, one CreationInfo, one SpdxDocument, element IDs and
+    /// relationship endpoints. It does not run the full SHACL model.
+    /// </summary>
+    function ValidateSpdx3Json(const AContent: string): TValidationResult;
+    /// <summary>
     /// Auto-detects the format and validates accordingly.
     /// </summary>
     function ValidateAuto(const AContent: string): TValidationResult;
   end;
 
+/// <summary>
+/// Returns CycloneDX 1.6 sequence errors for metadata and component children.
+/// An empty array means those elements are in an order the XSD accepts.
+/// This does not validate the rest of the document.
+/// </summary>
+function CycloneDxXmlSequenceErrors(const AContent: string): TArray<string>;
+
+/// <summary>
+/// True when AVersion is a CycloneDX specification version of 1.6 or later.
+/// BSI TR-03183-2 chapter 4 requires CycloneDX 1.6 as the minimum.
+/// </summary>
+function IsCycloneDxSpecVersionAccepted(const AVersion: string): Boolean;
+
 implementation
+
+function IsCycloneDxSpecVersionAccepted(const AVersion: string): Boolean;
+var
+  LParts: TArray<string>;
+  LMajor, LMinor: Integer;
+begin
+  LParts := Trim(AVersion).Split(['.']);
+  if Length(LParts) <> 2 then
+    Exit(False);
+  if not TryStrToInt(LParts[0], LMajor) or not TryStrToInt(LParts[1], LMinor) then
+    Exit(False);
+  if (LMajor < 0) or (LMinor < 0) then
+    Exit(False);
+  Result := (LMajor > 1) or ((LMajor = 1) and (LMinor >= 6));
+end;
 
 { TValidationResult }
 
@@ -132,17 +172,34 @@ begin
   Result.Warnings := FWarnings.ToArray;
 end;
 
-procedure TSbomValidator.ValidateSha256Hash(const AHash: string; const AContext: string);
+procedure TSbomValidator.ValidateHashValue(const AAlgorithm, AHash, AContext: string);
+var
+  LExpected: Integer;
+  LLabel: string;
 begin
+  if SameText(AAlgorithm, 'SHA-256') or SameText(AAlgorithm, 'SHA256') then
+  begin
+    LExpected := 64;
+    LLabel := 'SHA-256';
+  end
+  else if SameText(AAlgorithm, 'SHA-512') or SameText(AAlgorithm, 'SHA512') then
+  begin
+    LExpected := 128;
+    LLabel := 'SHA-512';
+  end
+  else
+    Exit;
+
   if AHash = '' then
   begin
     AddWarning(AContext + ': hash is empty');
     Exit;
   end;
-  if Length(AHash) <> 64 then
-    AddError(AContext + ': SHA-256 hash must be 64 hex characters, got ' + IntToStr(Length(AHash)));
-  if not TRegEx.IsMatch(AHash, '^[0-9a-fA-F]{64}$') then
-    AddError(AContext + ': SHA-256 hash contains invalid characters');
+  if Length(AHash) <> LExpected then
+    AddError(AContext + ': ' + LLabel + ' hash must be ' + IntToStr(LExpected) +
+      ' hex characters, got ' + IntToStr(Length(AHash)));
+  if not TRegEx.IsMatch(AHash, '^[0-9a-fA-F]{' + IntToStr(LExpected) + '}$') then
+    AddError(AContext + ': ' + LLabel + ' hash contains invalid characters');
 end;
 
 // ---------------------------------------------------------------------------
@@ -198,15 +255,18 @@ begin
       AddError('bomFormat must be "CycloneDX", got "' + LBomFormat + '"');
   end;
 
-  // specVersion (required, must be 1.4 or 1.5 or 1.6)
+  // specVersion (required). BSI TR-03183-2 chapter 4 requires 1.6 or later.
   LValue := AJson.GetValue('specVersion');
   if LValue = nil then
     AddError('Missing required field: specVersion')
   else
   begin
     LSpecVersion := LValue.Value;
-    if (LSpecVersion <> '1.4') and (LSpecVersion <> '1.5') and (LSpecVersion <> '1.6') then
-      AddWarning('specVersion "' + LSpecVersion + '" — expected 1.4, 1.5, or 1.6');
+    if not IsCycloneDxSpecVersionAccepted(LSpecVersion) then
+    begin
+      AddError('specVersion "' + LSpecVersion +
+        '" is below 1.6. BSI TR-03183-2 requires CycloneDX 1.6 or later');
+    end;
   end;
 
   // serialNumber (optional but recommended; must start with urn:uuid: if present)
@@ -279,7 +339,7 @@ begin
       AddWarning('metadata.timestamp may not be valid ISO 8601: ' + LTimestamp);
   end;
 
-  // component (required — describes the subject of the SBOM)
+  // component (required; describes the subject of the SBOM)
   LValue := AMetadata.GetValue('component');
   if LValue = nil then
     AddWarning('metadata: missing recommended field: component')
@@ -334,8 +394,10 @@ begin
           AddError(AContext + '.hashes[' + IntToStr(I) + ']: missing required field: alg');
         if LContent = nil then
           AddError(AContext + '.hashes[' + IntToStr(I) + ']: missing required field: content')
-        else if (LAlg <> nil) and (LAlg.Value = 'SHA-256') then
-          ValidateSha256Hash(LContent.Value, AContext + '.hashes[' + IntToStr(I) + ']');
+        else if (LAlg <> nil) and
+          (SameText(LAlg.Value, 'SHA-256') or SameText(LAlg.Value, 'SHA-512')) then
+          ValidateHashValue(LAlg.Value, LContent.Value,
+            AContext + '.hashes[' + IntToStr(I) + ']');
       end;
     end;
   end;
@@ -426,7 +488,16 @@ begin
 
   // CycloneDX namespace
   if Pos('http://cyclonedx.org/schema/bom/', AContent) = 0 then
-    AddError('Missing CycloneDX namespace (http://cyclonedx.org/schema/bom/...)');
+    AddError('Missing CycloneDX namespace (http://cyclonedx.org/schema/bom/...)')
+  else
+  begin
+    LMatch := TRegEx.Match(AContent, 'http://cyclonedx\.org/schema/bom/([0-9]+\.[0-9]+)');
+    if LMatch.Success and not IsCycloneDxSpecVersionAccepted(LMatch.Groups[1].Value) then
+    begin
+      AddError('CycloneDX namespace version ' + LMatch.Groups[1].Value +
+        ' is below 1.6. BSI TR-03183-2 requires CycloneDX 1.6 or later');
+    end;
+  end;
 
   // <bom> root element
   if Pos('<bom', AContent) = 0 then
@@ -468,19 +539,201 @@ begin
     AddWarning('No <component> elements found with type attribute');
 
   // Hash elements validation
-  var LHashMatches := TRegEx.Matches(AContent, '<hash\s+alg="SHA-256">([^<]*)</hash>', [roIgnoreCase]);
+  var LHashMatches := TRegEx.Matches(AContent,
+    '<hash\s+alg="(SHA-256|SHA-512)">([^<]*)</hash>', [roIgnoreCase]);
   var LHashMatch: TMatch;
   for LHashMatch in LHashMatches do
-  begin
-    var LHashValue := LHashMatch.Groups[1].Value;
-    ValidateSha256Hash(LHashValue, 'XML hash element');
-  end;
+    ValidateHashValue(LHashMatch.Groups[1].Value, LHashMatch.Groups[2].Value,
+      'XML hash element');
 
   // <dependencies> section (recommended)
   if Pos('<dependencies>', AContent) = 0 then
     AddWarning('Missing recommended element: <dependencies>');
 
+  for var LSequenceError in CycloneDxXmlSequenceErrors(AContent) do
+    AddError(LSequenceError);
+
   Result := BuildResult;
+end;
+
+function CycloneDxXmlSequenceErrors(const AContent: string): TArray<string>;
+const
+  cMetadataOrder: array[0..9] of string = (
+    'timestamp', 'lifecycles', 'tools', 'authors', 'component',
+    'manufacturer', 'manufacture', 'supplier', 'licenses', 'properties');
+  cComponentOrder: array[0..28] of string = (
+    'supplier', 'manufacturer', 'authors', 'author', 'publisher', 'group',
+    'name', 'version', 'description', 'scope', 'hashes', 'licenses',
+    'copyright', 'cpe', 'purl', 'omniborId', 'swhid', 'swid', 'modified',
+    'pedigree', 'externalReferences', 'properties', 'components', 'evidence',
+    'releaseNotes', 'modelCard', 'data', 'cryptoProperties', 'tags');
+var
+  LErrors: TList<string>;
+  LPos: Integer;
+  LStack: TArray<string>;
+  LChildren: TArray<TArray<string>>;
+  LName: string;
+  LClosing, LSelfClosing: Boolean;
+  LQuote: Char;
+
+  procedure CheckOrder(const AParent: string; const ANames: TArray<string>;
+    const AExpected: array of string);
+  var
+    I, J, LIndex, LLast: Integer;
+  begin
+    LLast := -1;
+    for I := 0 to High(ANames) do
+    begin
+      LIndex := -1;
+      for J := Low(AExpected) to High(AExpected) do
+        if SameText(AExpected[J], ANames[I]) then
+        begin
+          LIndex := J;
+          Break;
+        end;
+      if LIndex < 0 then
+        Continue;
+      if LIndex < LLast then
+        LErrors.Add('<' + AParent + '>: <' + ANames[I] +
+          '> is out of CycloneDX 1.6 sequence order');
+      LLast := LIndex;
+    end;
+  end;
+
+  procedure Push(const AName: string);
+  var
+    LFrame: Integer;
+  begin
+    LFrame := Length(LStack);
+    SetLength(LStack, LFrame + 1);
+    SetLength(LChildren, LFrame + 1);
+    LStack[LFrame] := AName;
+    SetLength(LChildren[LFrame], 0);
+  end;
+
+  procedure Pop;
+  var
+    LFrame: Integer;
+    LParent: string;
+    LNames: TArray<string>;
+  begin
+    if Length(LStack) = 0 then
+      Exit;
+    LFrame := High(LStack);
+    LParent := LStack[LFrame];
+    LNames := LChildren[LFrame];
+    SetLength(LStack, LFrame);
+    SetLength(LChildren, LFrame);
+    if SameText(LParent, 'metadata') then
+      CheckOrder(LParent, LNames, cMetadataOrder)
+    else if SameText(LParent, 'component') then
+      CheckOrder(LParent, LNames, cComponentOrder);
+  end;
+
+  procedure AddChild(const AName: string);
+  var
+    LCount, LFrame: Integer;
+  begin
+    if Length(LStack) = 0 then
+      Exit;
+    LFrame := High(LStack);
+    LCount := Length(LChildren[LFrame]);
+    SetLength(LChildren[LFrame], LCount + 1);
+    LChildren[LFrame][LCount] := AName;
+  end;
+
+begin
+  LErrors := TList<string>.Create;
+  try
+    LPos := 1;
+    SetLength(LStack, 0);
+    SetLength(LChildren, 0);
+    while LPos <= Length(AContent) do
+    begin
+      if AContent[LPos] <> '<' then
+      begin
+        Inc(LPos);
+        Continue;
+      end;
+
+      if (LPos < Length(AContent)) and (AContent[LPos + 1] = '?') then
+      begin
+        Inc(LPos);
+        while (LPos < Length(AContent)) and
+          not ((AContent[LPos] = '?') and (AContent[LPos + 1] = '>')) do
+          Inc(LPos);
+        Inc(LPos, 2);
+        Continue;
+      end;
+
+      if Copy(AContent, LPos, 4) = '<!--' then
+      begin
+        Inc(LPos, 4);
+        while (LPos <= Length(AContent) - 2) and (Copy(AContent, LPos, 3) <> '-->') do
+          Inc(LPos);
+        Inc(LPos, 3);
+        Continue;
+      end;
+
+      Inc(LPos);
+      LClosing := (LPos <= Length(AContent)) and (AContent[LPos] = '/');
+      if LClosing then
+        Inc(LPos);
+
+      LName := '';
+      while (LPos <= Length(AContent)) and (AContent[LPos] > ' ') and
+        (AContent[LPos] <> '>') and (AContent[LPos] <> '/') do
+      begin
+        LName := LName + AContent[LPos];
+        Inc(LPos);
+      end;
+      if Pos(':', LName) > 0 then
+        LName := Copy(LName, Pos(':', LName) + 1, MaxInt);
+
+      LSelfClosing := False;
+      LQuote := #0;
+      while LPos <= Length(AContent) do
+      begin
+        if LQuote <> #0 then
+        begin
+          if AContent[LPos] = LQuote then
+            LQuote := #0;
+          Inc(LPos);
+          Continue;
+        end;
+        if (AContent[LPos] = '"') or (AContent[LPos] = '''') then
+        begin
+          LQuote := AContent[LPos];
+          Inc(LPos);
+          Continue;
+        end;
+        if AContent[LPos] = '/' then
+          LSelfClosing := True;
+        if AContent[LPos] = '>' then
+        begin
+          Inc(LPos);
+          Break;
+        end;
+        Inc(LPos);
+      end;
+
+      if LName = '' then
+        Continue;
+
+      if LClosing then
+        Pop
+      else
+      begin
+        AddChild(LName);
+        if not LSelfClosing then
+          Push(LName);
+      end;
+    end;
+
+    Result := LErrors.ToArray;
+  finally
+    LErrors.Free;
+  end;
 end;
 
 // ---------------------------------------------------------------------------
@@ -664,8 +917,10 @@ begin
           AddError(AContext + '.checksums[' + IntToStr(I) + ']: missing required field: algorithm');
         if LVal = nil then
           AddError(AContext + '.checksums[' + IntToStr(I) + ']: missing required field: checksumValue')
-        else if (LAlg <> nil) and (LAlg.Value = 'SHA256') then
-          ValidateSha256Hash(LVal.Value, AContext + '.checksums[' + IntToStr(I) + ']');
+        else if (LAlg <> nil) and
+          (SameText(LAlg.Value, 'SHA256') or SameText(LAlg.Value, 'SHA512')) then
+          ValidateHashValue(LAlg.Value, LVal.Value,
+            AContext + '.checksums[' + IntToStr(I) + ']');
       end;
     end;
   end;
@@ -674,6 +929,132 @@ end;
 // ---------------------------------------------------------------------------
 // Auto-detect and validate
 // ---------------------------------------------------------------------------
+
+function TSbomValidator.ValidateSpdx3Json(const AContent: string): TValidationResult;
+begin
+  FErrors.Clear;
+  FWarnings.Clear;
+
+  if Trim(AContent) = '' then
+  begin
+    AddError('Document is empty');
+    Exit(BuildResult);
+  end;
+
+  try
+    var LValue := TJSONObject.ParseJSONValue(AContent);
+    try
+      if not (LValue is TJSONObject) then
+      begin
+        AddError('Invalid JSON: could not parse document');
+        Exit(BuildResult);
+      end;
+      ValidateSpdx3JsonInternal(TJSONObject(LValue));
+    finally
+      LValue.Free;
+    end;
+  except
+    on E: Exception do
+      AddError('JSON parse error: ' + E.Message);
+  end;
+
+  Result := BuildResult;
+end;
+
+procedure TSbomValidator.ValidateSpdx3JsonInternal(const AJson: TJSONObject);
+begin
+  var LContext := AJson.GetValue('@context');
+  if not Assigned(LContext) or (LContext.Value <> 'https://spdx.org/rdf/3.0.1/spdx-context.jsonld') then
+    AddError('"@context" must be https://spdx.org/rdf/3.0.1/spdx-context.jsonld');
+  if not (AJson.GetValue('@graph') is TJSONArray) then
+  begin
+    AddError('"@graph" must be an array');
+    Exit;
+  end;
+
+  var LGraph := TJSONArray(AJson.GetValue('@graph'));
+  var LIds := TDictionary<string, Boolean>.Create;
+  try
+    var LCreationInfos := 0;
+    var LDocuments := 0;
+    for var i := 0 to LGraph.Count - 1 do
+    begin
+      if not (LGraph.Items[i] is TJSONObject) then
+      begin
+        AddError(Format('@graph[%d] must be an object', [i]));
+        Continue;
+      end;
+      var LItem := TJSONObject(LGraph.Items[i]);
+      var LType := '';
+      if Assigned(LItem.GetValue('type')) then
+        LType := LItem.GetValue('type').Value;
+      if LType = '' then
+      begin
+        AddError(Format('@graph[%d] has no type', [i]));
+        Continue;
+      end;
+      if LType = 'CreationInfo' then
+      begin
+        Inc(LCreationInfos);
+        if not Assigned(LItem.GetValue('specVersion')) or (LItem.GetValue('specVersion').Value <> '3.0.1') then
+          AddError('CreationInfo specVersion must be 3.0.1');
+        if not Assigned(LItem.GetValue('created')) or
+          not TRegEx.IsMatch(LItem.GetValue('created').Value, '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$') then
+          AddError('CreationInfo created must be a UTC timestamp (YYYY-MM-DDThh:mm:ssZ)');
+        if not (LItem.GetValue('createdBy') is TJSONArray) or (TJSONArray(LItem.GetValue('createdBy')).Count = 0) then
+          AddError('CreationInfo createdBy must name at least one agent');
+        Continue;
+      end;
+      if LType = 'SpdxDocument' then
+        Inc(LDocuments);
+      var LId := '';
+      if Assigned(LItem.GetValue('spdxId')) then
+        LId := LItem.GetValue('spdxId').Value;
+      if LId = '' then
+        AddError(Format('%s at @graph[%d] has no spdxId', [LType, i]))
+      else if LIds.ContainsKey(LId) then
+        AddError('Duplicate spdxId: ' + LId)
+      else
+        LIds.Add(LId, True);
+      if not Assigned(LItem.GetValue('creationInfo')) then
+        AddError(Format('%s %s has no creationInfo', [LType, LId]));
+    end;
+    if LCreationInfos <> 1 then
+      AddError(Format('Expected one CreationInfo, found %d', [LCreationInfos]));
+    if LDocuments <> 1 then
+      AddError(Format('Expected one SpdxDocument, found %d', [LDocuments]));
+
+    // Relationship endpoints must be graph elements or the SPDX individuals.
+    for var i := 0 to LGraph.Count - 1 do
+    begin
+      if not (LGraph.Items[i] is TJSONObject) then
+        Continue;
+      var LItem := TJSONObject(LGraph.Items[i]);
+      if not Assigned(LItem.GetValue('type')) or (LItem.GetValue('type').Value <> 'Relationship') then
+        Continue;
+      var LFrom := '';
+      if Assigned(LItem.GetValue('from')) then
+        LFrom := LItem.GetValue('from').Value;
+      if not LIds.ContainsKey(LFrom) then
+        AddError('Relationship from is not an element in the graph: ' + LFrom);
+      if not Assigned(LItem.GetValue('relationshipType')) then
+        AddError('Relationship without relationshipType from ' + LFrom);
+      if not (LItem.GetValue('to') is TJSONArray) or (TJSONArray(LItem.GetValue('to')).Count = 0) then
+      begin
+        AddError('Relationship from ' + LFrom + ' has no to');
+        Continue;
+      end;
+      for var LTarget in TJSONArray(LItem.GetValue('to')) do
+      begin
+        if (LTarget.Value <> 'NoneElement') and (LTarget.Value <> 'NoAssertionElement') and
+          not LIds.ContainsKey(LTarget.Value) then
+          AddError('Relationship to is not an element in the graph: ' + LTarget.Value);
+      end;
+    end;
+  finally
+    LIds.Free;
+  end;
+end;
 
 function TSbomValidator.ValidateAuto(const AContent: string): TValidationResult;
 var
@@ -699,9 +1080,11 @@ begin
       Result := ValidateCycloneDxJson(AContent)
     else if Pos('"spdxVersion"', LTrimmed) > 0 then
       Result := ValidateSpdxJson(AContent)
+    else if (Pos('"@context"', LTrimmed) > 0) and (Pos('spdx.org/rdf/3.', LTrimmed) > 0) then
+      Result := ValidateSpdx3Json(AContent)
     else
     begin
-      AddError('Cannot determine SBOM format: no "bomFormat" or "spdxVersion" field found');
+      AddError('Cannot determine SBOM format: no "bomFormat", "spdxVersion" or SPDX 3 "@context" found');
       Result := BuildResult;
     end;
   end

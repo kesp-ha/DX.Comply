@@ -1,4 +1,4 @@
-/// <summary>
+﻿/// <summary>
 /// DX.Comply.Spdx.Writer
 /// Generates SPDX 2.3 SBOM documents in JSON format.
 /// </summary>
@@ -6,14 +6,24 @@
 /// <remarks>
 /// This unit provides TSpdxJsonWriter which generates SPDX 2.3 JSON SBOMs:
 /// - Document creation information (tool, timestamp, namespace)
-/// - Package list with checksums (SHA-256)
-/// - Relationship graph (DESCRIBES, CONTAINS)
+/// - Package list with checksums (SHA-256 and SHA-512)
+/// - Relationship graph (DESCRIBES, DEPENDS_ON, CONTAINS), including direct uses edges
 /// - Extracted licensing information
 ///
 /// SPDX 2.3 specification: https://spdx.github.io/spdx-spec/v2.3/
 ///
-/// Note: This is a Pro-tier feature but is included in the Community edition
-/// for completeness. Access control is handled at the application level.
+/// Package SPDX IDs are derived from the relative path plus the first 8
+/// lowercase hex digits of SHA-1 over the UTF-8 normalized path, so the same
+/// filename in two folders does not collide (issue #39).
+/// creationInfo.created is UTC YYYY-MM-DDThh:mm:ssZ. Package external
+/// references use a percent-encoded pkg:generic PURL so the locator has no
+/// whitespace (issue #40). licenseConcluded and licenseDeclared are
+/// NOASSERTION, except the built program and own-code units when a product
+/// licence is set, and Embarcadero units, which use their origin label.
+/// A licence that already starts with LicenseRef- keeps that prefix.
+/// supplier uses Organization: when metadata supplies a name.
+///
+/// SPDX JSON is part of the MIT-licensed tool, the same as the CycloneDX writers.
 /// </remarks>
 ///
 /// <copyright>
@@ -34,6 +44,13 @@ uses
   System.DateUtils,
   DX.Comply.Engine.Intf;
 
+const
+  /// <summary>
+  /// SPDX License List version written as creationInfo.licenseListVersion.
+  /// Update this one constant when a newer list is adopted.
+  /// </summary>
+  cSpdxLicenseListVersion = '3.29';
+
 type
   /// <summary>
   /// Implementation of ISbomWriter for SPDX 2.3 JSON format.
@@ -44,17 +61,29 @@ type
       cSpdxVersion = 'SPDX-2.3';
       cDataLicense = 'CC0-1.0';
       cToolName = 'DX.Comply';
-      cToolVersion = '1.0.0';
       cSpdxIdPrefix = 'SPDXRef-';
   private
     function GenerateUuid: string;
     function SanitizeSpdxId(const AValue: string): string;
+    function NormalizeSpdxPath(const APath: string): string;
+    function BuildPackageSpdxId(const ARelativePath: string): string;
+    function CollectPackageSpdxIds(const AArtefacts: TArtefactList): TArray<string>;
+    function BuildGenericPurl(const ARelativePath: string): string;
     function BuildCreationInfo(const AMetadata: TSbomMetadata): TJSONObject;
-    function BuildPackage(const AArtefact: TArtefactInfo; const AIndex: Integer;
-      const AProjectInfo: TProjectInfo): TJSONObject;
+    function BuildPackage(const AArtefact: TArtefactInfo; const ASpdxId,
+      ASupplier, ALicence, AVersion: string): TJSONObject;
     function BuildRelationships(const AArtefacts: TArtefactList;
-      const ADocumentSpdxId: string): TJSONArray;
+      const APackageIds: TArray<string>;
+      const ADocumentSpdxId, AProjectName, AOutputFilePath: string): TJSONArray;
   public
+    /// <summary>
+    /// Builds the SPDX 2.3 document in memory. APackageIds holds the package
+    /// SPDXID of each artefact, in artefact order. The caller owns the result.
+    /// The SPDX 3.0.1 writer converts this document (issue #108).
+    /// </summary>
+    function BuildDocument(const AMetadata: TSbomMetadata;
+      const AArtefacts: TArtefactList; const AProjectInfo: TProjectInfo;
+      out APackageIds: TArray<string>): TJSONObject;
     function Write(const AOutputPath: string;
       const AMetadata: TSbomMetadata;
       const AArtefacts: TArtefactList;
@@ -64,6 +93,12 @@ type
   end;
 
 implementation
+
+uses
+  System.Hash,
+  DX.Comply.ComponentManifest,
+  DX.Comply.DependencyGraph,
+  DX.Comply.VersionInfo;
 
 { TSpdxJsonWriter }
 
@@ -93,77 +128,231 @@ begin
   end;
 end;
 
+function TSpdxJsonWriter.NormalizeSpdxPath(const APath: string): string;
+begin
+  // Separator-insensitive so setup\foo.exe and setup/foo.exe stay one ID.
+  Result := StringReplace(Trim(APath), '\', '/', [rfReplaceAll]);
+end;
+
+function TSpdxJsonWriter.BuildPackageSpdxId(const ARelativePath: string): string;
+var
+  LPath: string;
+  LSanitized: string;
+  LHash: string;
+  LBytes: TBytes;
+  LSha: THashSHA1;
+begin
+  // Basename alone collides when the same file sits in two folders (issue #39).
+  // The readable part is the sanitized relative path. A short SHA-1 of that
+  // path keeps the ID stable and distinct when sanitizing would collapse two
+  // different paths (for example "a/b" and "a-b").
+  LPath := NormalizeSpdxPath(ARelativePath);
+  if LPath = '' then
+    LPath := 'unknown';
+
+  LSanitized := SanitizeSpdxId(LPath);
+  if LSanitized = '' then
+    LSanitized := 'unknown';
+
+  // System.Hash on Delphi 11-13 exposes GetHashString for string and TStream
+  // only, not TBytes. Hash the UTF-8 bytes of the normalized path and keep
+  // the first 8 lowercase hex characters. The same path always yields the
+  // same suffix.
+  LBytes := TEncoding.UTF8.GetBytes(LPath);
+  LSha := THashSHA1.Create;
+  if Length(LBytes) > 0 then
+    LSha.Update(LBytes, Length(LBytes));
+  LHash := Copy(LowerCase(LSha.HashAsString), 1, 8);
+  Result := cSpdxIdPrefix + 'Package-' + LSanitized + '-' + LHash;
+end;
+
+function TSpdxJsonWriter.CollectPackageSpdxIds(
+  const AArtefacts: TArtefactList): TArray<string>;
+var
+  LUsed: TDictionary<string, Integer>;
+  I: Integer;
+  LSuffix: Integer;
+  LBase: string;
+  LId: string;
+begin
+  SetLength(Result, AArtefacts.Count);
+  LUsed := TDictionary<string, Integer>.Create;
+  try
+    for I := 0 to AArtefacts.Count - 1 do
+    begin
+      LBase := BuildPackageSpdxId(AArtefacts[I].RelativePath);
+      LId := LBase;
+      LSuffix := 2;
+      // Identical paths still need unique IDs inside one document.
+      while LUsed.ContainsKey(LId) do
+      begin
+        LId := LBase + '-' + IntToStr(LSuffix);
+        Inc(LSuffix);
+      end;
+      LUsed.Add(LId, I);
+      Result[I] := LId;
+    end;
+  finally
+    LUsed.Free;
+  end;
+end;
+
+function TSpdxJsonWriter.BuildGenericPurl(const ARelativePath: string): string;
+var
+  LNormalized: string;
+  LSegments: TArray<string>;
+  LSegment: string;
+  LBytes: TBytes;
+  LByte: Byte;
+  LEncoded: string;
+  LHasName: Boolean;
+begin
+  // A file: path is not a Package URL, and spaces in it fail SPDX validation
+  // (issue #40). pkg:generic/<segments> is a real purl. Each segment is
+  // percent-encoded so the locator cannot contain whitespace or purl
+  // delimiters (@ ? #).
+  Result := '';
+  LNormalized := StringReplace(Trim(ARelativePath), '\', '/', [rfReplaceAll]);
+  LSegments := LNormalized.Split(['/']);
+  LHasName := False;
+  Result := 'pkg:generic';
+  for LSegment in LSegments do
+  begin
+    if LSegment = '' then
+      Continue;
+    LEncoded := '';
+    LBytes := TEncoding.UTF8.GetBytes(LSegment);
+    for LByte in LBytes do
+    begin
+      if ((LByte >= Ord('a')) and (LByte <= Ord('z'))) or
+         ((LByte >= Ord('A')) and (LByte <= Ord('Z'))) or
+         ((LByte >= Ord('0')) and (LByte <= Ord('9'))) or
+         (LByte = Ord('-')) or (LByte = Ord('.')) or
+         (LByte = Ord('_')) or (LByte = Ord('~')) then
+        LEncoded := LEncoded + Char(LByte)
+      else
+        LEncoded := LEncoded + '%' + IntToHex(LByte, 2);
+    end;
+    if LEncoded = '' then
+      Continue;
+    Result := Result + '/' + LEncoded;
+    LHasName := True;
+  end;
+  if not LHasName then
+    Result := '';
+end;
+
 function TSpdxJsonWriter.BuildCreationInfo(const AMetadata: TSbomMetadata): TJSONObject;
 var
   LCreationInfo: TJSONObject;
   LCreators: TJSONArray;
-  LTimestamp: string;
+  LKind, LCreator: string;
 begin
   LCreationInfo := TJSONObject.Create;
 
-  if AMetadata.Timestamp <> '' then
-    LTimestamp := AMetadata.Timestamp
-  else
-    LTimestamp := DateToISO8601(Now, False);
-
-  LCreationInfo.AddPair('created', LTimestamp);
-  LCreationInfo.AddPair('licenseListVersion', '3.19');
+  LCreationInfo.AddPair('created', FormatUtcTimestamp(AMetadata.Timestamp));
+  LCreationInfo.AddPair('licenseListVersion', cSpdxLicenseListVersion);
 
   LCreators := TJSONArray.Create;
-  LCreators.Add('Tool: ' + cToolName + '-' + cToolVersion);
+  LCreators.Add('Tool: ' + cToolName + '-' + ResolveDxComplyToolVersion(AMetadata.ToolVersion));
   if AMetadata.Supplier <> '' then
     LCreators.Add('Organization: ' + AMetadata.Supplier);
+  // SPDX 2.3 creators have no URL slot. An email is a Person. A URL goes
+  // in the creation comment. The tool does not invent a person name.
+  LCreator := Trim(AMetadata.SbomCreator);
+  LKind := BsiCreatorKind(LCreator);
+  if LKind = 'email' then
+    LCreators.Add('Person: ' + LCreator + ' (' + LCreator + ')');
   LCreationInfo.AddPair('creators', LCreators);
+  if LKind = 'url' then
+    LCreationInfo.AddPair('comment', 'SBOM creator URL: ' + LCreator);
 
   Result := LCreationInfo;
 end;
 
 function TSpdxJsonWriter.BuildPackage(const AArtefact: TArtefactInfo;
-  const AIndex: Integer; const AProjectInfo: TProjectInfo): TJSONObject;
+  const ASpdxId, ASupplier, ALicence, AVersion: string): TJSONObject;
 var
   LPackage: TJSONObject;
   LChecksums: TJSONArray;
   LChecksum: TJSONObject;
-  LSpdxId: string;
   LFileName: string;
+  LName: string;
+  LKind: TLicenceKind;
+  LToken: string;
 begin
   LPackage := TJSONObject.Create;
 
-  LFileName := TPath.GetFileName(AArtefact.RelativePath);
-  LSpdxId := cSpdxIdPrefix + 'Package-' + SanitizeSpdxId(LFileName);
+  LName := ArtefactComponentName(AArtefact);
+  LFileName := BsiComponentFileName(AArtefact.RelativePath);
+  LPackage.AddPair('SPDXID', ASpdxId);
+  LPackage.AddPair('name', LName);
+  if LFileName <> '' then
+  begin
+    LPackage.AddPair('packageFileName', LFileName);
+    // A product version used in place of a file-date stand-in is not a file date.
+    LPackage.AddPair('comment', BsiPropertyComment(AArtefact,
+      not ComponentVersionFromFileDate(AArtefact, AVersion)));
+  end;
 
-  LPackage.AddPair('SPDXID', LSpdxId);
-  LPackage.AddPair('name', LFileName);
-
-  if AArtefact.Hash <> '' then
-    LPackage.AddPair('versionInfo', Copy(AArtefact.Hash, 1, 12));
+  // Only a known version is written. The built program with no version of
+  // its own uses the product version. The hash is in checksums.
+  if AVersion <> '' then
+    LPackage.AddPair('versionInfo', AVersion);
 
   LPackage.AddPair('downloadLocation', 'NOASSERTION');
   LPackage.AddPair('filesAnalyzed', TJSONBool.Create(False));
+  // The built program and own-code units carry the product licence.
+  // An Embarcadero unit carries its origin label. Every other package
+  // stays NOASSERTION, the same as a scanned file with no manifest row.
+  LToken := SpdxLicenceTokenFor(ALicence, LKind);
+  LPackage.AddPair('licenseConcluded', LToken);
+  LPackage.AddPair('licenseDeclared', LToken);
 
-  // Package verification code is not applicable for binary-only analysis
-  LPackage.AddPair('supplier', 'NOASSERTION');
+  // Package verification code is not applicable for binary-only analysis.
+  // --supplier / product.supplier is an organization name, not an SPDX agent
+  // string, so prefix it the same way creationInfo.creators does.
+  if Trim(ASupplier) <> '' then
+    LPackage.AddPair('supplier', 'Organization: ' + Trim(ASupplier))
+  else
+    LPackage.AddPair('supplier', 'NOASSERTION');
+  if IsBsiEmailAddress(Trim(ASupplier)) then
+    LPackage.AddPair('originator', 'Person: ' + Trim(ASupplier) + ' (' +
+      Trim(ASupplier) + ')');
+  // A scanned file has no copyright notice. A manifest library sets its
+  // own copyrightText from the row when that row has one.
   LPackage.AddPair('copyrightText', 'NOASSERTION');
 
-  // Checksums
-  if AArtefact.Hash <> '' then
+  // Checksums. SHA256 stays first. SHA512 is the SPDX 2.3 algorithm name.
+  if (AArtefact.Hash <> '') or (AArtefact.HashSha512 <> '') then
   begin
     LChecksums := TJSONArray.Create;
-    LChecksum := TJSONObject.Create;
-    LChecksum.AddPair('algorithm', 'SHA256');
-    LChecksum.AddPair('checksumValue', LowerCase(AArtefact.Hash));
-    LChecksums.Add(LChecksum);
+    if AArtefact.Hash <> '' then
+    begin
+      LChecksum := TJSONObject.Create;
+      LChecksum.AddPair('algorithm', 'SHA256');
+      LChecksum.AddPair('checksumValue', LowerCase(AArtefact.Hash));
+      LChecksums.Add(LChecksum);
+    end;
+    if AArtefact.HashSha512 <> '' then
+    begin
+      LChecksum := TJSONObject.Create;
+      LChecksum.AddPair('algorithm', 'SHA512');
+      LChecksum.AddPair('checksumValue', LowerCase(AArtefact.HashSha512));
+      LChecksums.Add(LChecksum);
+    end;
     LPackage.AddPair('checksums', LChecksums);
   end;
 
-  // External references (purl)
-  if AArtefact.RelativePath <> '' then
+  // External reference. Omitted when the path cannot form a purl name.
+  var LPurl := BuildGenericPurl(AArtefact.RelativePath);
+  if LPurl <> '' then
   begin
     var LExtRefs := TJSONArray.Create;
     var LExtRef := TJSONObject.Create;
     LExtRef.AddPair('referenceCategory', 'PACKAGE-MANAGER');
     LExtRef.AddPair('referenceType', 'purl');
-    LExtRef.AddPair('referenceLocator', 'file:' + AArtefact.RelativePath);
+    LExtRef.AddPair('referenceLocator', LPurl);
     LExtRefs.Add(LExtRef);
     LPackage.AddPair('externalRefs', LExtRefs);
   end;
@@ -171,51 +360,133 @@ begin
   Result := LPackage;
 end;
 
+procedure AddRootExtractedLicence(ARoot: TJSONObject; const ALicence: string);
+var
+  LKind: TLicenceKind;
+  LToken, LNormalised: string;
+  LArray: TJSONArray;
+  LInfo: TJSONObject;
+  LItem: TJSONValue;
+  I: Integer;
+begin
+  LToken := SpdxLicenceTokenFor(ALicence, LKind);
+  if LKind <> lkName then
+    Exit;
+  ClassifyLicence(ALicence, LNormalised);
+  if ARoot.GetValue('hasExtractedLicensingInfos') is TJSONArray then
+    LArray := TJSONArray(ARoot.GetValue('hasExtractedLicensingInfos'))
+  else
+  begin
+    LArray := TJSONArray.Create;
+    ARoot.AddPair('hasExtractedLicensingInfos', LArray);
+  end;
+  for I := 0 to LArray.Count - 1 do
+  begin
+    if not (LArray.Items[I] is TJSONObject) then
+      Continue;
+    LItem := TJSONObject(LArray.Items[I]).GetValue('licenseId');
+    if (LItem <> nil) and SameText(LItem.Value, LToken) then
+      Exit;
+  end;
+  LInfo := TJSONObject.Create;
+  LArray.Add(LInfo);
+  LInfo.AddPair('licenseId', LToken);
+  LInfo.AddPair('name', LNormalised);
+  LInfo.AddPair('extractedText', LNormalised);
+end;
+
 function TSpdxJsonWriter.BuildRelationships(const AArtefacts: TArtefactList;
-  const ADocumentSpdxId: string): TJSONArray;
+  const APackageIds: TArray<string>;
+  const ADocumentSpdxId, AProjectName, AOutputFilePath: string): TJSONArray;
 var
   LRelationships: TJSONArray;
   LRel: TJSONObject;
   I: Integer;
-  LFileName: string;
+  LTargetIndex: Integer;
+  LRelation: string;
 begin
   LRelationships := TJSONArray.Create;
+  if not Assigned(AArtefacts) then
+    Exit(LRelationships);
 
-  // DESCRIBES relationship from document to each package
+  // DESCRIBES from the document to each package. The related ID must be the
+  // same value written on the package (issue #39).
   for I := 0 to AArtefacts.Count - 1 do
   begin
-    LFileName := TPath.GetFileName(AArtefacts[I].RelativePath);
-
     LRel := TJSONObject.Create;
     LRel.AddPair('spdxElementId', ADocumentSpdxId);
     LRel.AddPair('relationshipType', 'DESCRIBES');
-    LRel.AddPair('relatedSpdxElement', cSpdxIdPrefix + 'Package-' + SanitizeSpdxId(LFileName));
+    LRel.AddPair('relatedSpdxElement', APackageIds[I]);
+    LRelationships.Add(LRel);
+  end;
+
+  // The deliverable contains linked units and depends on runtime packages
+  // and external DLLs. Same parent as the CycloneDX dependencies graph.
+  // Edges use the path-based package IDs, not the filename alone.
+  LTargetIndex := FindDeliverableTargetIndex(AArtefacts, AProjectName,
+    AOutputFilePath);
+  if LTargetIndex < 0 then
+    Exit(LRelationships);
+
+  for I := 0 to AArtefacts.Count - 1 do
+  begin
+    if I = LTargetIndex then
+      Continue;
+    if SameText(AArtefacts[I].ArtefactType, 'unit-evidence') then
+      LRelation := 'CONTAINS'
+    else
+      LRelation := 'DEPENDS_ON';
+
+    LRel := TJSONObject.Create;
+    LRel.AddPair('spdxElementId', APackageIds[LTargetIndex]);
+    LRel.AddPair('relationshipType', LRelation);
+    LRel.AddPair('relatedSpdxElement', APackageIds[I]);
     LRelationships.Add(LRel);
   end;
 
   Result := LRelationships;
 end;
 
-function TSpdxJsonWriter.Write(const AOutputPath: string;
-  const AMetadata: TSbomMetadata;
-  const AArtefacts: TArtefactList;
-  const AProjectInfo: TProjectInfo): Boolean;
+procedure AppendUsesRelationships(ARelationships: TJSONArray;
+  const APackageIds: TArray<string>; const AGraph: TUsesDependencyGraph);
+var
+  LDep: TUsesDependency;
+  LRel: TJSONObject;
+  LTarget: Integer;
+begin
+  if not Assigned(ARelationships) then
+    Exit;
+  for LDep in AGraph.Dependencies do
+    for LTarget in LDep.TargetIndexes do
+    begin
+      if (LDep.SourceIndex < 0) or (LDep.SourceIndex > High(APackageIds)) or
+         (LTarget < 0) or (LTarget > High(APackageIds)) then
+        Continue;
+      LRel := TJSONObject.Create;
+      LRel.AddPair('spdxElementId', APackageIds[LDep.SourceIndex]);
+      LRel.AddPair('relationshipType', 'DEPENDS_ON');
+      LRel.AddPair('relatedSpdxElement', APackageIds[LTarget]);
+      ARelationships.Add(LRel);
+    end;
+end;
+
+function TSpdxJsonWriter.BuildDocument(const AMetadata: TSbomMetadata;
+  const AArtefacts: TArtefactList; const AProjectInfo: TProjectInfo;
+  out APackageIds: TArray<string>): TJSONObject;
 var
   LRoot: TJSONObject;
   LPackages: TJSONArray;
-  LOutput: TStringList;
   LDocumentSpdxId: string;
   LDocNamespace: string;
+  LPackageIds: TArray<string>;
+  LGraph: TUsesDependencyGraph;
   I: Integer;
+  LRootIndex: Integer;
+  LManifest: TComponentManifest;
+  LLicenceError: string;
+  LLicence: string;
+  LIsDeliverable: Boolean;
 begin
-  Result := False;
-  if AOutputPath = '' then
-    Exit;
-
-  var LOutputDir := TPath.GetDirectoryName(AOutputPath);
-  if (LOutputDir <> '') and not TDirectory.Exists(LOutputDir) then
-    TDirectory.CreateDirectory(LOutputDir);
-
   LDocumentSpdxId := cSpdxIdPrefix + 'DOCUMENT';
   LDocNamespace := 'https://spdx.org/spdxdocs/' +
     SanitizeSpdxId(AProjectInfo.ProjectName) + '-' + GenerateUuid;
@@ -225,7 +496,7 @@ begin
     LRoot.AddPair('spdxVersion', cSpdxVersion);
     LRoot.AddPair('dataLicense', cDataLicense);
     LRoot.AddPair('SPDXID', LDocumentSpdxId);
-    // Prefer metadata override (CLI --product) over project name — issue #26.
+    // Prefer metadata override (CLI --product) over project name (issue #26).
     if AMetadata.ProductName <> '' then
       LRoot.AddPair('name', AMetadata.ProductName)
     else
@@ -235,19 +506,96 @@ begin
     // Creation info
     LRoot.AddPair('creationInfo', BuildCreationInfo(AMetadata));
 
-    // Packages
+    // Packages. IDs are assigned once so relationships point at the same values.
+    // The product licence is written on the built program. A second copy of
+    // that file gets the same licence (issue #155). Own-code units use it
+    // too when it is set (issue #166). Embarcadero units use their origin
+    // label (issue #165).
+    LRootIndex := FindDeliverableTargetIndex(AArtefacts, AProjectInfo.ProjectName,
+      AProjectInfo.OutputFilePath);
+    LManifest := Default(TComponentManifest);
+    if Trim(AMetadata.ComponentManifestJson) <> '' then
+    begin
+      // A failed parse leaves the manifest unloaded. A non-empty error does too.
+      if not TryParseComponentManifest(AMetadata.ComponentManifestJson, '',
+        LManifest, LLicenceError) or (LLicenceError <> '') then
+        LManifest := Default(TComponentManifest);
+    end;
+    LPackageIds := CollectPackageSpdxIds(AArtefacts);
     LPackages := TJSONArray.Create;
     for I := 0 to AArtefacts.Count - 1 do
-      LPackages.Add(BuildPackage(AArtefacts[I], I, AProjectInfo));
+    begin
+      LIsDeliverable := IsSameDeliverableFile(AArtefacts, I, LRootIndex);
+      LLicence := ComponentLicenceFor(AArtefacts[I], LIsDeliverable,
+        AMetadata.Licence, LManifest);
+      LPackages.Add(BuildPackage(AArtefacts[I], LPackageIds[I], AMetadata.Supplier,
+        LLicence, ComponentVersionFor(AArtefacts[I], LIsDeliverable,
+          AMetadata.ProductVersion, AProjectInfo.Version)));
+    end;
     LRoot.AddPair('packages', LPackages);
 
-    // Relationships
-    LRoot.AddPair('relationships', BuildRelationships(AArtefacts, LDocumentSpdxId));
+    // Relationships. Manifest libraries use the same package IDs.
+    // Uses edges are added after that rewrite. A unit-to-unit DEPENDS_ON is
+    // not one of the edges the manifest moves onto a library. The program
+    // still CONTAINS every linked unit. System and SysInit are not uses
+    // edges. They stay on that CONTAINS list. A shipped .pas, .dpr, or .dpk
+    // gets the same DEPENDS_ON edges.
+    LGraph := BuildUsesDependencyGraph(AArtefacts);
+    LRoot.AddPair('relationships', BuildRelationships(AArtefacts, LPackageIds,
+      LDocumentSpdxId, AProjectInfo.ProjectName, AProjectInfo.OutputFilePath));
+    if AMetadata.ComponentManifestJson <> '' then
+      ApplyManifestSpdx(AMetadata.ComponentManifestJson, AArtefacts, LPackages,
+        LRoot.GetValue('relationships') as TJSONArray, LPackageIds,
+        LDocumentSpdxId, LRoot);
+    if (LRootIndex >= 0) and (Trim(AMetadata.Licence) <> '') then
+      AddRootExtractedLicence(LRoot, AMetadata.Licence);
+    // Name licences on units (Embarcadero origin labels, and a product
+    // licence that is not an SPDX id) need an extracted entry. The helper
+    // skips SPDX ids and keeps one entry per token.
+    for I := 0 to AArtefacts.Count - 1 do
+    begin
+      if IsSameDeliverableFile(AArtefacts, I, LRootIndex) then
+        Continue;
+      LLicence := ComponentLicenceFor(AArtefacts[I], False, AMetadata.Licence,
+        LManifest);
+      if LLicence <> '' then
+        AddRootExtractedLicence(LRoot, LLicence);
+    end;
+    AppendUsesRelationships(LRoot.GetValue('relationships') as TJSONArray,
+      LPackageIds, LGraph);
+  except
+    LRoot.Free;
+    raise;
+  end;
+  APackageIds := LPackageIds;
+  Result := LRoot;
+end;
 
-    // Write to file
+function TSpdxJsonWriter.Write(const AOutputPath: string;
+  const AMetadata: TSbomMetadata;
+  const AArtefacts: TArtefactList;
+  const AProjectInfo: TProjectInfo): Boolean;
+var
+  LRoot: TJSONObject;
+  LOutput: TStringList;
+  LPackageIds: TArray<string>;
+begin
+  Result := False;
+  if AOutputPath = '' then
+    Exit;
+
+  var LOutputDir := TPath.GetDirectoryName(AOutputPath);
+  if (LOutputDir <> '') and not TDirectory.Exists(LOutputDir) then
+    TDirectory.CreateDirectory(LOutputDir);
+
+  LRoot := BuildDocument(AMetadata, AArtefacts, AProjectInfo, LPackageIds);
+  try
     LOutput := TStringList.Create;
     try
       LOutput.Text := LRoot.Format(2);
+      // RFC 8259 section 8.1: JSON text is UTF-8 without a byte order mark.
+      // Strict parsers reject a file that starts with one.
+      LOutput.WriteBOM := False;
       LOutput.SaveToFile(AOutputPath, TEncoding.UTF8);
       Result := True;
     finally

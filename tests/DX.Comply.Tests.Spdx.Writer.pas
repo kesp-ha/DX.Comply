@@ -24,9 +24,11 @@ uses
   System.Classes,
   System.JSON,
   System.Generics.Collections,
+  System.RegularExpressions,
   DUnitX.TestFramework,
   DX.Comply.Spdx.Writer,
-  DX.Comply.Engine.Intf;
+  DX.Comply.Engine.Intf,
+  DX.Comply.VersionInfo;
 
 type
   [TestFixture]
@@ -40,6 +42,8 @@ type
     function LoadOutputJson: TJSONObject;
     function MakeArtefact(const ARelativePath, AArtefactType, AHash: string;
       AFileSize: Int64): TArtefactInfo;
+    function PackageAt(const AJson: TJSONObject; AIndex: Integer): TJSONObject;
+    function IsSpdxId(const AId: string): Boolean;
   public
     [Setup]
     procedure Setup;
@@ -51,6 +55,13 @@ type
 
     [Test]
     procedure Write_EmptyArtefacts_CreatesFile;
+
+    /// <summary>
+    /// JSON output starts with "{", not with a UTF-8 byte order mark
+    /// (RFC 8259 section 8.1). Strict JSON parsers reject a leading mark.
+    /// </summary>
+    [Test]
+    procedure Write_Output_HasNoByteOrderMark;
 
     [Test]
     procedure Write_ContainsSpdxVersion;
@@ -71,6 +82,9 @@ type
     procedure Write_CreationInfo_HasCreators;
 
     [Test]
+    procedure Write_CreationInfo_LicenseListVersionFromConstant;
+
+    [Test]
     procedure Write_SingleArtefact_ContainsPackage;
 
     [Test]
@@ -81,6 +95,9 @@ type
 
     [Test]
     procedure Write_Relationship_IsDescribes;
+
+    [Test]
+    procedure Write_Relationships_DeliverableDependsOnCategories;
 
     [Test]
     procedure Validate_ValidSpdx_ReturnsTrue;
@@ -96,6 +113,78 @@ type
 
     [Test]
     procedure Write_Package_SpdxIdStartsWithPrefix;
+
+    /// <summary>
+    /// Two artefacts with the same basename and different paths must get
+    /// distinct SPDX IDs, and relationships must point at those IDs (issue #39).
+    /// </summary>
+    [Test]
+    procedure Write_DuplicateBasename_SpdxIdsDiffer;
+
+    /// <summary>
+    /// The same relative path always yields the same ID, including when only
+    /// the directory separator changes (issue #39).
+    /// </summary>
+    [Test]
+    procedure Write_SpdxId_StableAcrossSeparators;
+
+    /// <summary>Characters outside the SPDX ID alphabet are sanitized (issue #39).</summary>
+    [Test]
+    procedure Write_SpdxId_SanitizesIllegalCharacters;
+
+    /// <summary>creationInfo.created matches YYYY-MM-DDThh:mm:ssZ (issue #40).</summary>
+    [Test]
+    procedure Write_Created_MatchesUtcPattern;
+
+    /// <summary>
+    /// Offset timestamps and fractional seconds are normalized to UTC Z (issue #40).
+    /// </summary>
+    [Test]
+    procedure Write_Created_NormalizesOffsetTimestamp;
+
+    /// <summary>No referenceLocator contains whitespace (issue #40).</summary>
+    [Test]
+    procedure Write_ReferenceLocator_ContainsNoWhitespace;
+
+    /// <summary>
+    /// Packages carry NOASSERTION licenses, and supplier follows metadata.
+    /// </summary>
+    [Test]
+    procedure Write_Package_LicenseAndSupplier;
+
+    /// <summary>
+    /// The product licence is written on the built program.
+    /// Another package stays NOASSERTION.
+    /// </summary>
+    [Test]
+    procedure Write_RootLicence_OnDeliverablePackage;
+    /// <summary>
+    /// The project output file keeps the product licence when its type is
+    /// not application, library, or package. A second copy of that file
+    /// does too. A neighboring application stays NOASSERTION (issue #155).
+    /// </summary>
+    [Test]
+    procedure Write_ProductLicence_OnUntypedProjectExe;
+    /// <summary>
+    /// Embarcadero units carry their origin label as a LicenseRef.
+    /// Own-code units carry the product licence. Issues #165 and #166.
+    /// </summary>
+    [Test]
+    procedure Write_UnitLicences_EmbarcaderoAndOwnCode;
+    /// <summary>
+    /// A product or manifest licence that already starts with LicenseRef-
+    /// keeps that prefix. A plain name still gets one prefix.
+    /// </summary>
+    [Test]
+    procedure Write_LicenseRef_IsNotDoubled;
+    /// <summary>
+    /// The built program with no version of its own uses the product version.
+    /// A shared library with no version resource is that case. A third-party
+    /// file keeps its own version, or none. A file-date stand-in on the
+    /// built program is replaced and is not marked as a file date.
+    /// </summary>
+    [Test]
+    procedure Write_DeliverableWithoutVersion_UsesProductVersion;
   end;
 
 implementation
@@ -113,9 +202,11 @@ begin
   FMetadata.ProductName := 'TestProduct';
   FMetadata.ProductVersion := '1.0.0';
   FMetadata.Supplier := 'Test GmbH';
+  FMetadata.SupplierUrl := '';
+  FMetadata.Licence := '';
   FMetadata.Timestamp := '2026-02-24T10:00:00+01:00';
   FMetadata.ToolName := 'DX.Comply';
-  FMetadata.ToolVersion := '1.0.0';
+  FMetadata.ToolVersion := '';
 
   FProjectInfo := TProjectInfo.Create;
   FProjectInfo.ProjectName := 'TestProject';
@@ -159,6 +250,19 @@ begin
   Result.FileSize := AFileSize;
 end;
 
+function TSpdxWriterTests.PackageAt(const AJson: TJSONObject; AIndex: Integer): TJSONObject;
+var
+  LPackages: TJSONArray;
+begin
+  LPackages := AJson.GetValue('packages') as TJSONArray;
+  Result := LPackages.Items[AIndex] as TJSONObject;
+end;
+
+function TSpdxWriterTests.IsSpdxId(const AId: string): Boolean;
+begin
+  Result := TRegEx.IsMatch(AId, '^SPDXRef-[a-zA-Z0-9.\-]+$');
+end;
+
 procedure TSpdxWriterTests.GetFormat_ReturnsSpdxJson;
 begin
   Assert.AreEqual(Ord(sfSpdxJson), Ord(FWriter.GetFormat));
@@ -168,6 +272,17 @@ procedure TSpdxWriterTests.Write_EmptyArtefacts_CreatesFile;
 begin
   Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
   Assert.IsTrue(TFile.Exists(FOutputFile));
+end;
+
+procedure TSpdxWriterTests.Write_Output_HasNoByteOrderMark;
+var
+  LBytes: TBytes;
+begin
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LBytes := TFile.ReadAllBytes(FOutputFile);
+  Assert.IsTrue(Length(LBytes) > 0, 'Output must not be empty');
+  Assert.AreEqual(NativeInt(Ord('{')), NativeInt(LBytes[0]),
+    'The file must start with "{", not with a byte order mark');
 end;
 
 procedure TSpdxWriterTests.Write_ContainsSpdxVersion;
@@ -250,7 +365,23 @@ begin
     LCreationInfo := LJson.GetValue('creationInfo') as TJSONObject;
     LCreators := LCreationInfo.GetValue('creators') as TJSONArray;
     Assert.IsTrue(LCreators.Count > 0);
-    Assert.IsTrue(LCreators.Items[0].Value.StartsWith('Tool: DX.Comply'));
+    Assert.AreEqual('Tool: DX.Comply-' + GetDxComplyToolVersion, LCreators.Items[0].Value,
+      'The SPDX creator tool token must use the running module version');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_CreationInfo_LicenseListVersionFromConstant;
+var
+  LJson: TJSONObject;
+begin
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    Assert.AreEqual(cSpdxLicenseListVersion,
+      (LJson.GetValue('creationInfo') as TJSONObject).GetValue<string>('licenseListVersion'));
+    Assert.AreNotEqual('3.19', cSpdxLicenseListVersion, 'The licence list version must not stay at 3.19');
   finally
     LJson.Free;
   end;
@@ -328,6 +459,93 @@ begin
   end;
 end;
 
+procedure TSpdxWriterTests.Write_Relationships_DeliverableDependsOnCategories;
+var
+  LJson: TJSONObject;
+  LRelationships: TJSONArray;
+  LRel: TJSONObject;
+  I: Integer;
+  LAppId, LRtlId, LDllId, LUnitId: string;
+
+  function HasRelationship(const AFrom, AType, ATo: string): Boolean;
+  var
+    J: Integer;
+    LItem: TJSONObject;
+  begin
+    Result := False;
+    for J := 0 to LRelationships.Count - 1 do
+    begin
+      LItem := LRelationships.Items[J] as TJSONObject;
+      if (LItem.GetValue<string>('spdxElementId') = AFrom) and
+         (LItem.GetValue<string>('relationshipType') = AType) and
+         (LItem.GetValue<string>('relatedSpdxElement') = ATo) then
+        Exit(True);
+    end;
+  end;
+
+  function PackageId(const AName: string): string;
+  var
+    LPackages: TJSONArray;
+    K: Integer;
+    LPackage: TJSONObject;
+  begin
+    Result := '';
+    LPackages := LJson.GetValue('packages') as TJSONArray;
+    for K := 0 to LPackages.Count - 1 do
+    begin
+      LPackage := LPackages.Items[K] as TJSONObject;
+      if SameText(LPackage.GetValue<string>('name'), AName) then
+        Exit(LPackage.GetValue<string>('SPDXID'));
+    end;
+    Assert.AreNotEqual('', Result, AName + ' must appear as a package');
+  end;
+
+  function IsFilenameOnlyId(const AId, AFileName: string): Boolean;
+  begin
+    Result := SameText(AId, 'SPDXRef-Package-' + AFileName);
+  end;
+
+begin
+  FArtefacts.Add(MakeArtefact('TestProject.exe', 'application', '', 1024));
+  FArtefacts.Add(MakeArtefact('rtl.bpl', 'runtime-package', '', -1));
+  FArtefacts.Add(MakeArtefact('vendor.dll', 'external-reference', '', -1));
+  FArtefacts.Add(MakeArtefact('System.dcu', 'unit-evidence', '', 10));
+
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  try
+    LRelationships := LJson.GetValue('relationships') as TJSONArray;
+    Assert.IsNotNull(LRelationships);
+    LRel := LRelationships.Items[0] as TJSONObject;
+    Assert.AreEqual('DESCRIBES', LRel.GetValue<string>('relationshipType'),
+      'DESCRIBES entries must stay ahead of the dependency edges');
+
+    LAppId := PackageId('TestProject.exe');
+    LRtlId := PackageId('rtl.bpl');
+    LDllId := PackageId('vendor.dll');
+    LUnitId := PackageId('System.dcu');
+    Assert.IsFalse(IsFilenameOnlyId(LAppId, 'TestProject.exe'),
+      'relationship IDs must use the path-based package SPDX ID');
+
+    Assert.IsTrue(HasRelationship(LAppId, 'DEPENDS_ON', LRtlId),
+      'the deliverable must DEPENDS_ON the runtime package');
+    Assert.IsTrue(HasRelationship(LAppId, 'DEPENDS_ON', LDllId),
+      'the deliverable must DEPENDS_ON the external DLL');
+    Assert.IsTrue(HasRelationship(LAppId, 'CONTAINS', LUnitId),
+      'the deliverable must CONTAIN the linked unit');
+
+    for I := 0 to LRelationships.Count - 1 do
+    begin
+      LRel := LRelationships.Items[I] as TJSONObject;
+      if LRel.GetValue<string>('relationshipType') = 'DESCRIBES' then
+        Assert.AreEqual('SPDXRef-DOCUMENT', LRel.GetValue<string>('spdxElementId'),
+          'DESCRIBES must still originate at the document');
+    end;
+  finally
+    LJson.Free;
+  end;
+end;
+
 procedure TSpdxWriterTests.Validate_ValidSpdx_ReturnsTrue;
 var
   LContent: TStringList;
@@ -379,6 +597,618 @@ begin
   try
     LPackage := (LJson.GetValue('packages') as TJSONArray).Items[0] as TJSONObject;
     Assert.IsTrue(LPackage.GetValue<string>('SPDXID').StartsWith('SPDXRef-'));
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_DuplicateBasename_SpdxIdsDiffer;
+var
+  LJson: TJSONObject;
+  LFirstId, LSecondId: string;
+  LRelationships: TJSONArray;
+  LRel: TJSONObject;
+begin
+  FArtefacts.Add(MakeArtefact('setup\4dcompiler.exe', 'application', '', 1024));
+  FArtefacts.Add(MakeArtefact('tools\4dcompiler.exe', 'application', '', 2048));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+
+  LJson := LoadOutputJson;
+  try
+    LFirstId := PackageAt(LJson, 0).GetValue<string>('SPDXID');
+    LSecondId := PackageAt(LJson, 1).GetValue<string>('SPDXID');
+
+    Assert.AreNotEqual(LFirstId, LSecondId,
+      'Same basename in different folders must not share an SPDX ID');
+    Assert.AreNotEqual('SPDXRef-Package-4dcompiler.exe', LFirstId,
+      'SPDX ID must not be derived from the basename alone');
+    Assert.IsTrue(IsSpdxId(LFirstId), 'First SPDX ID must match SPDXRef-[A-Za-z0-9.-]+');
+    Assert.IsTrue(IsSpdxId(LSecondId), 'Second SPDX ID must match SPDXRef-[A-Za-z0-9.-]+');
+    Assert.IsTrue(LFirstId.Contains('setup-4dcompiler.exe'),
+      'ID should keep the sanitized relative path');
+    Assert.IsTrue(LSecondId.Contains('tools-4dcompiler.exe'),
+      'ID should keep the sanitized relative path');
+
+    LRelationships := LJson.GetValue('relationships') as TJSONArray;
+    // Two DESCRIBES edges, plus DEPENDS_ON from the first application
+    // (same score, first match is the deliverable) to the second.
+    Assert.AreEqual(NativeInt(3), NativeInt(LRelationships.Count));
+    LRel := LRelationships.Items[0] as TJSONObject;
+    Assert.AreEqual('DESCRIBES', LRel.GetValue<string>('relationshipType'));
+    Assert.AreEqual(LFirstId, LRel.GetValue<string>('relatedSpdxElement'),
+      'Relationship must point at the first package ID');
+    LRel := LRelationships.Items[1] as TJSONObject;
+    Assert.AreEqual('DESCRIBES', LRel.GetValue<string>('relationshipType'));
+    Assert.AreEqual(LSecondId, LRel.GetValue<string>('relatedSpdxElement'),
+      'Relationship must point at the second package ID');
+    LRel := LRelationships.Items[2] as TJSONObject;
+    Assert.AreEqual('DEPENDS_ON', LRel.GetValue<string>('relationshipType'));
+    Assert.AreEqual(LFirstId, LRel.GetValue<string>('spdxElementId'),
+      'the first application is the deliverable');
+    Assert.AreEqual(LSecondId, LRel.GetValue<string>('relatedSpdxElement'),
+      'DEPENDS_ON must use the path-based package ID');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_SpdxId_StableAcrossSeparators;
+var
+  LSlashId, LBackslashId, LAgain: string;
+  LJson: TJSONObject;
+begin
+  FArtefacts.Add(MakeArtefact('setup/4dcompiler.exe', 'application', '', 1024));
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LSlashId := PackageAt(LJson, 0).GetValue<string>('SPDXID');
+  finally
+    LJson.Free;
+  end;
+
+  FArtefacts.Clear;
+  FArtefacts.Add(MakeArtefact('setup\4dcompiler.exe', 'application', '', 1024));
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LBackslashId := PackageAt(LJson, 0).GetValue<string>('SPDXID');
+  finally
+    LJson.Free;
+  end;
+
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LAgain := PackageAt(LJson, 0).GetValue<string>('SPDXID');
+  finally
+    LJson.Free;
+  end;
+
+  Assert.AreEqual(LSlashId, LBackslashId,
+    'Forward and back slashes of the same path must produce one ID');
+  Assert.AreEqual(LBackslashId, LAgain,
+    'Writing the same artefact again must keep the same SPDX ID');
+  Assert.IsTrue(IsSpdxId(LSlashId));
+end;
+
+procedure TSpdxWriterTests.Write_SpdxId_SanitizesIllegalCharacters;
+var
+  LJson: TJSONObject;
+  LId: string;
+begin
+  FArtefacts.Add(MakeArtefact('my tools\foo_bar.dll', 'library', '', 64));
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LId := PackageAt(LJson, 0).GetValue<string>('SPDXID');
+    Assert.IsTrue(IsSpdxId(LId), 'Sanitized SPDX ID must match the SPDX pattern');
+    Assert.IsTrue(LId.Contains('my-tools-foo-bar.dll'),
+      'Spaces, slashes and underscores must become hyphens');
+    Assert.IsFalse(LId.Contains(' '), 'SPDX ID must not contain spaces');
+    Assert.IsFalse(LId.Contains('_'), 'SPDX ID must not contain underscores');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_Created_MatchesUtcPattern;
+var
+  LJson: TJSONObject;
+  LCreated: string;
+begin
+  FMetadata.Timestamp := '';
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LCreated := (LJson.GetValue('creationInfo') as TJSONObject).GetValue<string>('created');
+    Assert.IsTrue(TRegEx.IsMatch(LCreated, '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'),
+      'created must be UTC YYYY-MM-DDThh:mm:ssZ, got ' + LCreated);
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_Created_NormalizesOffsetTimestamp;
+var
+  LJson: TJSONObject;
+  LCreated: string;
+begin
+  // The value reported by tools.spdx.org in issue #40.
+  FMetadata.Timestamp := '2026-05-18T14:27:39.895+10:00';
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LCreated := (LJson.GetValue('creationInfo') as TJSONObject).GetValue<string>('created');
+    Assert.AreEqual('2026-05-18T04:27:39Z', LCreated,
+      'Fractional seconds are dropped and the offset is converted to UTC');
+  finally
+    LJson.Free;
+  end;
+
+  FMetadata.Timestamp := '2026-02-24T10:00:00.895Z';
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LCreated := (LJson.GetValue('creationInfo') as TJSONObject).GetValue<string>('created');
+    Assert.AreEqual('2026-02-24T10:00:00Z', LCreated);
+  finally
+    LJson.Free;
+  end;
+
+  FMetadata.Timestamp := '2026-02-24T10:00:00-05:00';
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LCreated := (LJson.GetValue('creationInfo') as TJSONObject).GetValue<string>('created');
+    Assert.AreEqual('2026-02-24T15:00:00Z', LCreated);
+  finally
+    LJson.Free;
+  end;
+
+  FMetadata.Timestamp := '2026-05-18T14:27:39+1000';
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LCreated := (LJson.GetValue('creationInfo') as TJSONObject).GetValue<string>('created');
+    Assert.AreEqual('2026-05-18T04:27:39Z', LCreated);
+  finally
+    LJson.Free;
+  end;
+
+  FMetadata.Timestamp := '2026-01-01T01:30:00+10:00';
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LCreated := (LJson.GetValue('creationInfo') as TJSONObject).GetValue<string>('created');
+    Assert.AreEqual('2025-12-31T15:30:00Z', LCreated,
+      'Offset conversion must cross the day boundary');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_ReferenceLocator_ContainsNoWhitespace;
+var
+  LJson: TJSONObject;
+  LPackages: TJSONArray;
+  LPackage, LRef: TJSONObject;
+  LRefs: TJSONArray;
+  LLocator: string;
+  I: Integer;
+begin
+  FArtefacts.Add(MakeArtefact('workshop4\helper tool.dll', 'library', '', 32));
+  FArtefacts.Add(MakeArtefact('tools\workshop4.exe', 'application', '', 64));
+  FArtefacts.Add(MakeArtefact('dist\foo@bar.dll', 'library', '', 8));
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LPackages := LJson.GetValue('packages') as TJSONArray;
+    for I := 0 to LPackages.Count - 1 do
+    begin
+      LPackage := LPackages.Items[I] as TJSONObject;
+      LRefs := LPackage.GetValue('externalRefs') as TJSONArray;
+      Assert.IsNotNull(LRefs, 'Package must carry an external reference');
+      LRef := LRefs.Items[0] as TJSONObject;
+      LLocator := LRef.GetValue<string>('referenceLocator');
+      Assert.IsFalse(LLocator.Contains(' '),
+        'referenceLocator must not contain spaces: ' + LLocator);
+      Assert.IsFalse(LLocator.Contains(#9), 'referenceLocator must not contain tabs');
+      Assert.IsFalse(LLocator.Contains('\'), 'referenceLocator must use URI separators');
+    end;
+
+    LLocator := ((PackageAt(LJson, 0).GetValue('externalRefs') as TJSONArray)
+      .Items[0] as TJSONObject).GetValue<string>('referenceLocator');
+    Assert.AreEqual('pkg:generic/workshop4/helper%20tool.dll', LLocator,
+      'Spaces in the path must be percent-encoded inside a generic PURL');
+    Assert.IsTrue(LLocator.StartsWith('pkg:generic/'),
+      'referenceLocator must be a Package URL');
+
+    LLocator := ((PackageAt(LJson, 1).GetValue('externalRefs') as TJSONArray)
+      .Items[0] as TJSONObject).GetValue<string>('referenceLocator');
+    Assert.AreEqual('pkg:generic/tools/workshop4.exe', LLocator);
+
+    LLocator := ((PackageAt(LJson, 2).GetValue('externalRefs') as TJSONArray)
+      .Items[0] as TJSONObject).GetValue<string>('referenceLocator');
+    Assert.AreEqual('pkg:generic/dist/foo%40bar.dll', LLocator,
+      '@ must be percent-encoded so it is not read as a purl version');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_Package_LicenseAndSupplier;
+var
+  LJson: TJSONObject;
+  LPackage: TJSONObject;
+begin
+  FArtefacts.Add(MakeArtefact('MyApp.exe', 'application', '', 1024));
+  FMetadata.Supplier := 'Test GmbH';
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LPackage := PackageAt(LJson, 0);
+    Assert.AreEqual('NOASSERTION', LPackage.GetValue<string>('licenseConcluded'));
+    Assert.AreEqual('NOASSERTION', LPackage.GetValue<string>('licenseDeclared'));
+    Assert.AreEqual('Organization: Test GmbH', LPackage.GetValue<string>('supplier'));
+  finally
+    LJson.Free;
+  end;
+
+  FMetadata.Supplier := '';
+  FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo);
+  LJson := LoadOutputJson;
+  try
+    LPackage := PackageAt(LJson, 0);
+    Assert.AreEqual('NOASSERTION', LPackage.GetValue<string>('supplier'),
+      'An empty supplier stays NOASSERTION');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_RootLicence_OnDeliverablePackage;
+var
+  LJson, LPackage: TJSONObject;
+
+  function PackageNamed(const AJson: TJSONObject; const AName: string): TJSONObject;
+  var
+    LPackages: TJSONArray;
+    I: Integer;
+  begin
+    Result := nil;
+    LPackages := AJson.GetValue('packages') as TJSONArray;
+    Assert.IsNotNull(LPackages, 'packages must be present');
+    for I := 0 to LPackages.Count - 1 do
+      if SameText(TJSONObject(LPackages.Items[I]).GetValue<string>('name'), AName) then
+        Exit(TJSONObject(LPackages.Items[I]));
+  end;
+
+begin
+  FProjectInfo.ProjectName := 'TestProject';
+  FMetadata.Licence := 'Apache-2.0';
+  FArtefacts.Add(MakeArtefact('helper.dll', 'library', '', 100));
+  FArtefacts.Add(MakeArtefact('TestProject.exe', 'application', '', 200));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LPackage := PackageNamed(LJson, 'TestProject.exe');
+    Assert.IsNotNull(LPackage, 'The built program must be a package');
+    Assert.AreEqual('Apache-2.0', LPackage.GetValue<string>('licenseConcluded'));
+    Assert.AreEqual('Apache-2.0', LPackage.GetValue<string>('licenseDeclared'));
+
+    LPackage := PackageNamed(LJson, 'helper.dll');
+    Assert.IsNotNull(LPackage, 'The other binary must stay a package');
+    Assert.AreEqual('NOASSERTION', LPackage.GetValue<string>('licenseConcluded'));
+    Assert.AreEqual('NOASSERTION', LPackage.GetValue<string>('licenseDeclared'));
+    Assert.IsNull(LJson.GetValue('hasExtractedLicensingInfos'),
+      'An SPDX identifier needs no extracted licensing info');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_ProductLicence_OnUntypedProjectExe;
+var
+  LJson, LPackage: TJSONObject;
+  LPackages: TJSONArray;
+  I, LLicensed: Integer;
+  LName: string;
+begin
+  FProjectInfo.ProjectName := 'OtherApp';
+  FProjectInfo.OutputFilePath := 'C:\Projects\build\XmlConvert.exe';
+  FMetadata.Licence := 'Apache-2.0';
+  FArtefacts.Add(MakeArtefact('XmlConvert.exe', 'file', '', 200));
+  FArtefacts.Add(MakeArtefact('setup\XmlConvert.exe', 'file', '', 200));
+  FArtefacts.Add(MakeArtefact('OtherApp.exe', 'application', '', 100));
+  FArtefacts.Add(MakeArtefact('bit.dll', 'library', '', 100));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    LPackages := LJson.GetValue('packages') as TJSONArray;
+    Assert.IsNotNull(LPackages, 'packages must be present');
+    Assert.AreEqual(NativeInt(4), NativeInt(LPackages.Count),
+      'The project executable stays in the SBOM');
+    LLicensed := 0;
+    for I := 0 to LPackages.Count - 1 do
+    begin
+      LPackage := LPackages.Items[I] as TJSONObject;
+      LName := LPackage.GetValue<string>('name');
+      if Pos('XmlConvert.exe', LName) > 0 then
+      begin
+        Assert.AreEqual('Apache-2.0', LPackage.GetValue<string>('licenseConcluded'));
+        Assert.AreEqual('Apache-2.0', LPackage.GetValue<string>('licenseDeclared'));
+        Inc(LLicensed);
+      end
+      else
+      begin
+        Assert.AreEqual('NOASSERTION', LPackage.GetValue<string>('licenseConcluded'),
+          'A neighboring binary stays NOASSERTION');
+        Assert.AreEqual('NOASSERTION', LPackage.GetValue<string>('licenseDeclared'));
+      end;
+    end;
+    Assert.AreEqual(2, LLicensed, 'Both copies of the project executable are licensed');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_UnitLicences_EmbarcaderoAndOwnCode;
+var
+  LJson, LPackage: TJSONObject;
+  LExtracted: TJSONArray;
+  LUnit: TArtefactInfo;
+
+  function PackageNamed(const AName: string): TJSONObject;
+  var
+    LPackages: TJSONArray;
+    I: Integer;
+  begin
+    Result := nil;
+    LPackages := LJson.GetValue('packages') as TJSONArray;
+    Assert.IsNotNull(LPackages, 'packages must be present');
+    for I := 0 to LPackages.Count - 1 do
+      if SameText(TJSONObject(LPackages.Items[I]).GetValue<string>('name'), AName) then
+        Exit(TJSONObject(LPackages.Items[I]));
+  end;
+
+  procedure ExpectLicence(const AName, AToken: string);
+  begin
+    LPackage := PackageNamed(AName);
+    Assert.IsNotNull(LPackage, AName);
+    Assert.AreEqual(AToken, LPackage.GetValue<string>('licenseConcluded'), AName);
+    Assert.AreEqual(AToken, LPackage.GetValue<string>('licenseDeclared'), AName);
+  end;
+
+  function ExtractedName(const AId: string): string;
+  var
+    I: Integer;
+    LInfo: TJSONObject;
+  begin
+    Result := '';
+    if not (LJson.GetValue('hasExtractedLicensingInfos') is TJSONArray) then
+      Exit;
+    LExtracted := TJSONArray(LJson.GetValue('hasExtractedLicensingInfos'));
+    for I := 0 to LExtracted.Count - 1 do
+    begin
+      LInfo := LExtracted.Items[I] as TJSONObject;
+      if SameText(LInfo.GetValue<string>('licenseId'), AId) then
+        Exit(LInfo.GetValue<string>('name'));
+    end;
+  end;
+
+  procedure AddUnit(const AName, AOrigin, ASource: string);
+  begin
+    LUnit := MakeArtefact(AName, 'unit-evidence', 'abcd1234ef', 32);
+    LUnit.Origin := AOrigin;
+    LUnit.SourcePath := ASource;
+    FArtefacts.Add(LUnit);
+  end;
+
+begin
+  FMetadata.Licence := 'MIT';
+  FMetadata.ComponentManifestJson :=
+    '{"components":[{"name":"Wrapped","version":"1","vendor":"A","licence":"Apache-2.0",' +
+    '"type":"library","units_exact":["Data.DB"]}],' +
+    '"own_code_units":["MainForm"],"own_code_prefixes":["App"],' +
+    '"own_code_folders":["' +
+    StringReplace('C:\DXComplyFolderTest\src', '\', '\\', [rfReplaceAll]) + '"]}';
+  FArtefacts.Add(MakeArtefact('TestProject.exe', 'application', 'abcd1234ef', 1024));
+  AddUnit('System.SysUtils.pas', 'Embarcadero RTL', '');
+  AddUnit('Vcl.Forms.pas', 'Embarcadero VCL', '');
+  AddUnit('FMX.Forms.pas', 'Embarcadero FMX', '');
+  AddUnit('MainForm.pas', 'Local project', '');
+  AddUnit('AppSettings.pas', 'Local project', '');
+  AddUnit('Helper.pas', 'Local project', 'C:\DXComplyFolderTest\src\Helper.pas');
+  AddUnit('LocalOnly.pas', 'Local project', '');
+  AddUnit('Data.DB.pas', 'Embarcadero RTL', '');
+  FArtefacts.Add(MakeArtefact('vendor.dll', 'library', 'abcd1234ef', 64));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    ExpectLicence('TestProject.exe', 'MIT');
+    ExpectLicence('System.SysUtils.pas', 'LicenseRef-Embarcadero-RTL');
+    ExpectLicence('Vcl.Forms.pas', 'LicenseRef-Embarcadero-VCL');
+    ExpectLicence('FMX.Forms.pas', 'LicenseRef-Embarcadero-FMX');
+    ExpectLicence('MainForm.pas', 'MIT');
+    ExpectLicence('AppSettings.pas', 'MIT');
+    ExpectLicence('Helper.pas', 'MIT');
+    ExpectLicence('LocalOnly.pas', 'NOASSERTION');
+    ExpectLicence('vendor.dll', 'NOASSERTION');
+    ExpectLicence('Data.DB.pas', 'NOASSERTION');
+    ExpectLicence('Wrapped', 'Apache-2.0');
+    LExtracted := LJson.GetValue('hasExtractedLicensingInfos') as TJSONArray;
+    Assert.IsNotNull(LExtracted);
+    Assert.AreEqual(NativeInt(3), NativeInt(LExtracted.Count),
+      'Each Embarcadero origin label is one extracted licence');
+    Assert.AreEqual('Embarcadero RTL', ExtractedName('LicenseRef-Embarcadero-RTL'));
+    Assert.AreEqual('Embarcadero VCL', ExtractedName('LicenseRef-Embarcadero-VCL'));
+    Assert.AreEqual('Embarcadero FMX', ExtractedName('LicenseRef-Embarcadero-FMX'));
+  finally
+    LJson.Free;
+  end;
+
+  FMetadata.Licence := '';
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    ExpectLicence('TestProject.exe', 'NOASSERTION');
+    ExpectLicence('MainForm.pas', 'NOASSERTION');
+    ExpectLicence('System.SysUtils.pas', 'LicenseRef-Embarcadero-RTL');
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_LicenseRef_IsNotDoubled;
+var
+  LJson, LPackage: TJSONObject;
+  LExtracted: TJSONArray;
+
+  function PackageNamed(const AName: string): TJSONObject;
+  var
+    LPackages: TJSONArray;
+    I: Integer;
+  begin
+    Result := nil;
+    LPackages := LJson.GetValue('packages') as TJSONArray;
+    Assert.IsNotNull(LPackages, 'packages must be present');
+    for I := 0 to LPackages.Count - 1 do
+      if SameText(TJSONObject(LPackages.Items[I]).GetValue<string>('name'), AName) then
+        Exit(TJSONObject(LPackages.Items[I]));
+  end;
+
+  procedure ExpectLicence(const AName, AToken: string);
+  begin
+    LPackage := PackageNamed(AName);
+    Assert.IsNotNull(LPackage, AName);
+    Assert.AreEqual(AToken, LPackage.GetValue<string>('licenseConcluded'), AName);
+    Assert.AreEqual(AToken, LPackage.GetValue<string>('licenseDeclared'), AName);
+  end;
+
+  function ExtractedName(const AId: string): string;
+  var
+    I: Integer;
+    LInfo: TJSONObject;
+  begin
+    Result := '';
+    Assert.IsTrue(LJson.GetValue('hasExtractedLicensingInfos') is TJSONArray, AId);
+    LExtracted := TJSONArray(LJson.GetValue('hasExtractedLicensingInfos'));
+    for I := 0 to LExtracted.Count - 1 do
+    begin
+      LInfo := LExtracted.Items[I] as TJSONObject;
+      if LInfo.GetValue<string>('licenseId') = AId then
+        Exit(LInfo.GetValue<string>('name'));
+    end;
+  end;
+
+begin
+  FProjectInfo.ProjectName := 'TestProject';
+  FMetadata.Licence := 'LicenseRef-Proprietary';
+  FMetadata.ComponentManifestJson :=
+    '{"components":[' +
+    '{"name":"FreeLib","version":"1","vendor":"A","licence":"LicenseRef-Freeware-with-source",' +
+    '"type":"library","units_exact":["FreeUnit"]},' +
+    '{"name":"Spaced","version":"1","vendor":"A","licence":"LicenseRef-My Terms",' +
+    '"type":"library","units_exact":["SpaceUnit"]},' +
+    '{"name":"Plain","version":"1","vendor":"A","licence":"Freeware",' +
+    '"type":"library","units_exact":["PlainUnit"]},' +
+    '{"name":"Lower","version":"1","vendor":"A","licence":"licenseref-Internal",' +
+    '"type":"library","units_exact":["LowerUnit"]}' +
+    ']}';
+  FArtefacts.Add(MakeArtefact('TestProject.exe', 'application', 'abcd1234ef', 1024));
+  FArtefacts.Add(MakeArtefact('FreeUnit.pas', 'unit-evidence', 'abcd1234ef', 32));
+  FArtefacts.Add(MakeArtefact('SpaceUnit.pas', 'unit-evidence', 'abcd1234ef', 32));
+  FArtefacts.Add(MakeArtefact('PlainUnit.pas', 'unit-evidence', 'abcd1234ef', 32));
+  FArtefacts.Add(MakeArtefact('LowerUnit.pas', 'unit-evidence', 'abcd1234ef', 32));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    Assert.AreEqual(0, Pos('LicenseRef-LicenseRef', LJson.ToJSON));
+    ExpectLicence('TestProject.exe', 'LicenseRef-Proprietary');
+    ExpectLicence('FreeLib', 'LicenseRef-Freeware-with-source');
+    ExpectLicence('Spaced', 'LicenseRef-My-Terms');
+    ExpectLicence('Plain', 'LicenseRef-Freeware');
+    ExpectLicence('Lower', 'licenseref-Internal');
+    Assert.AreEqual('LicenseRef-Proprietary', ExtractedName('LicenseRef-Proprietary'));
+    Assert.AreEqual('LicenseRef-Freeware-with-source', ExtractedName('LicenseRef-Freeware-with-source'));
+    Assert.AreEqual('LicenseRef-My Terms', ExtractedName('LicenseRef-My-Terms'));
+    Assert.AreEqual('Freeware', ExtractedName('LicenseRef-Freeware'));
+    Assert.AreEqual('licenseref-Internal', ExtractedName('licenseref-Internal'));
+  finally
+    LJson.Free;
+  end;
+end;
+
+procedure TSpdxWriterTests.Write_DeliverableWithoutVersion_UsesProductVersion;
+var
+  LJson: TJSONObject;
+  LSo, LDll: TArtefactInfo;
+
+  function PackageNamed(const AName: string): TJSONObject;
+  var
+    LPackages: TJSONArray;
+    I: Integer;
+  begin
+    Result := nil;
+    LPackages := LJson.GetValue('packages') as TJSONArray;
+    Assert.IsNotNull(LPackages, 'packages must be present');
+    for I := 0 to LPackages.Count - 1 do
+      if (LPackages.Items[I] as TJSONObject).GetValue<string>('name') = AName then
+        Exit(LPackages.Items[I] as TJSONObject);
+    Assert.Fail(AName + ' must be a package');
+  end;
+
+begin
+  FProjectInfo.ProjectName := 'WernigApp';
+  FMetadata.ProductVersion := '16.0.0.7';
+  FArtefacts.Add(MakeArtefact('libWernigApp.so', 'file', 'abcd1234ef', 1024));
+  LDll := MakeArtefact('vendor.dll', 'library', 'abcd1234ef', 2048);
+  LDll.Version := '9.9.9';
+  FArtefacts.Add(LDll);
+  FArtefacts.Add(MakeArtefact('plugin.dll', 'library', 'abcd1234ef', 512));
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    Assert.AreEqual('16.0.0.7', PackageNamed('libWernigApp.so').GetValue<string>('versionInfo'),
+      'A shared library with no version resource uses the product version');
+    Assert.AreEqual(0, Pos(cVersionSourceFileDate,
+      PackageNamed('libWernigApp.so').GetValue<string>('comment')));
+    Assert.AreEqual('9.9.9', PackageNamed('vendor.dll').GetValue<string>('versionInfo'),
+      'A third-party DLL keeps its own version');
+    Assert.IsNull(PackageNamed('plugin.dll').GetValue('versionInfo'),
+      'A third-party file with no version stays without one');
+  finally
+    LJson.Free;
+  end;
+
+  FArtefacts.Clear;
+  LSo := MakeArtefact('libWernigApp.so', 'file', 'abcd1234ef', 1024);
+  LSo.Version := '2026-01-01T00:00:00Z';
+  LSo.VersionFromFileDate := True;
+  FArtefacts.Add(LSo);
+  LDll := MakeArtefact('vendor.dll', 'library', 'abcd1234ef', 2048);
+  LDll.Version := '2026-01-02T00:00:00Z';
+  LDll.VersionFromFileDate := True;
+  FArtefacts.Add(LDll);
+  Assert.IsTrue(FWriter.Write(FOutputFile, FMetadata, FArtefacts, FProjectInfo));
+  LJson := LoadOutputJson;
+  Assert.IsNotNull(LJson);
+  try
+    Assert.AreEqual('16.0.0.7', PackageNamed('libWernigApp.so').GetValue<string>('versionInfo'));
+    Assert.AreEqual(0, Pos(cVersionSourceFileDate,
+      PackageNamed('libWernigApp.so').GetValue<string>('comment')),
+      'The product version is not marked as a file date');
+    Assert.AreEqual('2026-01-02T00:00:00Z',
+      PackageNamed('vendor.dll').GetValue<string>('versionInfo'));
+    Assert.IsTrue(Pos(cVersionSourceFileDate,
+      PackageNamed('vendor.dll').GetValue<string>('comment')) > 0,
+      'A third-party file keeps its file-date version');
   finally
     LJson.Free;
   end;
